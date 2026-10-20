@@ -351,6 +351,15 @@ mark.find-hit.current {
   }
 }
 
+/* Older conversation turns render when near the view. Only where the browser anchors scrolling:
+   without it (iOS Safari) a turn that renders above the view changes height and the text jumps. */
+@supports (overflow-anchor: auto) {
+  .conv-lazy {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 320px;
+  }
+}
+
 /* Markdown */
 .md > * + * {
   margin-top: 0.5em;
@@ -413,6 +422,38 @@ mark.find-hit.current {
 }
 .md hr {
   border-color: var(--border);
+}
+.md-table {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.md table {
+  border-collapse: collapse;
+  font-size: 0.92em;
+  line-height: 1.45;
+  min-width: 100%;
+}
+.md th,
+.md td {
+  padding: 0.35em 0.7em;
+  text-align: left;
+  vertical-align: top;
+}
+.md td {
+  min-width: 4ch;
+  max-width: 28ch;
+  overflow-wrap: anywhere;
+}
+.md th {
+  font-weight: 600;
+  white-space: nowrap;
+  background: var(--surface-2);
+}
+.md tr + tr td,
+.md tbody tr:first-child td {
+  border-top: 1px solid var(--border);
 }
 
 /* Syntax tokens */

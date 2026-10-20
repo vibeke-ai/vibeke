@@ -26,6 +26,7 @@ import {
   ListTree,
   Loader2,
   Map as MapIcon,
+  Minimize2,
   Search,
   Square,
   SquareTerminal,
@@ -41,7 +42,7 @@ import { Button, Chip, DiffCount, Empty, IconButton, Spinner, cx } from '../../c
 import { t } from '../../i18n';
 import { errorMessage } from '../../lib/answer';
 import { ImageSourceContext, TranscriptImage } from '../../components/transcript-image';
-import { turnBlocks, turnHasWork, turnStats, turnText, turnToolIds, workedFor, type BgEventStatus, type ConvBlock, type Step, type ToolStep } from '../../lib/conversation';
+import { turnBlocks, turnHasWork, turnInterrupted, turnStats, turnText, turnToolIds, workedFor, type BgEventStatus, type ConvBlock, type Notice, type Step, type ToolStep } from '../../lib/conversation';
 import { bgTasksOf, bgToolIds } from '../../lib/bg-tasks';
 import { shortDuration } from '../../lib/format';
 import { toolSummary, type ToolKind } from '../../lib/tool-summary';
@@ -131,7 +132,7 @@ function ConversationSession({
   const trRef = useRef(tr);
   trRef.current = tr;
   const pendingScroll = useRef<{ k: 'bottom' } | { k: 'keep'; height: number; top: number } | null>(null);
-  const working = run.execution.value === 'working' || run.execution.value === 'starting';
+  const runWorking = run.execution.value === 'working' || run.execution.value === 'starting';
   const runRef = useRef(run.id);
   runRef.current = run.id;
   const currentRun = useRef(run);
@@ -154,6 +155,13 @@ function ConversationSession({
     const el = listRef.current;
     return !el || el.scrollHeight - el.scrollTop - el.clientHeight < 64;
   };
+  // Following the stream: new content keeps the view at the bottom. Any scroll up stops it (a
+  // small drag must not be pulled back down), reaching the bottom again resumes it, and nothing
+  // moves the view while a finger is on it.
+  const followRef = useRef(true);
+  const touching = useRef(false);
+  const lastTop = useRef(0);
+  const follows = () => followRef.current && !touching.current;
 
   // The newest turns: one request at a time, responses fenced by run (a late answer for the
   // previous run is dropped; see LatestFeed).
@@ -173,7 +181,7 @@ function ConversationSession({
         },
         apply: (target, { r, have }) => {
           if (target !== runRef.current || !transcriptMatchesRun(r, currentRun.current)) return;
-          if (nearBottom() || !have) pendingScroll.current = { k: 'bottom' };
+          if (follows() || !have) pendingScroll.current = { k: 'bottom' };
           setTr((s) => applyLatest(s.run !== null && s.run !== target ? emptyTranscript() : s, r));
           setPhase('ready');
           setError(null);
@@ -248,12 +256,17 @@ function ConversationSession({
     feed.schedule(DEBOUNCE_MS);
   }, [rev, refreshKey]);
 
+  // A message was just sent: follow the reply.
+  useEffect(() => {
+    if (refreshKey) followRef.current = true;
+  }, [refreshKey]);
+
   // Safety poll while the agent works and we are seen: slow when events flow, faster without.
   useEffect(() => {
-    if (!working || !visible || phase === 'none') return;
+    if (!runWorking || !visible || phase === 'none') return;
     const id = setInterval(() => void feed.load(), eventsLive ? SAFETY_POLL_MS : WORKING_POLL_MS);
     return () => clearInterval(id);
-  }, [working, visible, phase, eventsLive, feed]);
+  }, [runWorking, visible, phase, eventsLive, feed]);
 
   useLayoutEffect(() => {
     const p = pendingScroll.current;
@@ -267,18 +280,17 @@ function ConversationSession({
   // New approvals at the tail: keep them in view when following the stream.
   const tailRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
-    if (atBottom && listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
+    if (follows() && listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [tail]);
 
   // Following the stream: stay at the bottom when the content or the window changes size.
-  const atBottomRef = useRef(true);
   const contentRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = listRef.current;
     const inner = contentRef.current;
     if (!el || !inner || typeof ResizeObserver === 'undefined') return;
     const ro = new ResizeObserver(() => {
-      if (atBottomRef.current) el.scrollTop = el.scrollHeight;
+      if (follows()) el.scrollTop = el.scrollHeight;
     });
     ro.observe(el);
     ro.observe(inner);
@@ -289,7 +301,12 @@ function ConversationSession({
     const el = listRef.current;
     if (!el) return;
     const bottom = nearBottom();
-    atBottomRef.current = bottom;
+    const top = el.scrollTop;
+    // At the very bottom (also where an iOS bounce settles), going up, coming back down.
+    if (el.scrollHeight - top - el.clientHeight <= 4) followRef.current = true;
+    else if (top < lastTop.current) followRef.current = false;
+    else if (bottom) followRef.current = true;
+    lastTop.current = top;
     setAtBottom(bottom);
     if (el.scrollTop < 160 && trRef.current.nextBefore !== null && !olderBusy && phase === 'ready') void loadOlder();
   };
@@ -307,7 +324,11 @@ function ConversationSession({
   }, [git.status]);
 
   const turns = tr.turns;
-  const lastN = turns.length ? turns[turns.length - 1]!.n : -1;
+  const lastTurn = turns.length ? turns[turns.length - 1]! : null;
+  const lastN = lastTurn ? lastTurn.n : -1;
+  // A turn the user stopped has ended, even while the host still reports work (older hosts
+  // missed the interrupt: Claude sends no Stop hook for it).
+  const working = runWorking && !(lastTurn && turnInterrupted(lastTurn));
 
   // ---- links: URLs and workspace files in the text ----
   const linkText = useMemo(() => {
@@ -516,8 +537,15 @@ function ConversationSession({
       {findOpen && (
         <FindBar query={query} onQuery={onQuery} index={hit} count={count} onStep={stepFind} onClose={closeFind} placeholder={t.conv.findPlaceholder} note={findNote} />
       )}
-      <div ref={listRef} onScroll={onScroll} className="vk-scroll min-h-0 flex-1 overflow-y-auto" role="log" aria-label={t.conv.label} aria-busy={phase === 'loading'}>
-        <div ref={contentRef} className="mx-auto w-full max-w-[780px] px-4 pb-6 pt-3 sm:px-6">
+      <div
+        ref={listRef}
+        onScroll={onScroll}
+        onTouchStart={() => (touching.current = true)}
+        onTouchEnd={() => (touching.current = false)}
+        onTouchCancel={() => (touching.current = false)}
+        className="vk-scroll min-h-0 flex-1 overflow-y-auto" role="log" aria-label={t.conv.label} aria-busy={phase === 'loading'}>
+        {/* Bottom room for the floating controls, so they never cover the newest line. */}
+        <div ref={contentRef} className={cx('mx-auto w-full max-w-[780px] px-4 pt-3 sm:px-6', turns.length > 0 ? 'pb-14' : 'pb-6')}>
           <div className="flex h-8 items-center justify-center text-xs text-faint">
             {olderBusy ? (
               <span className="inline-flex items-center gap-1.5">
@@ -546,12 +574,7 @@ function ConversationSession({
               dels={turn.n === lastN ? diff.dels : 0}
             />
           ))}
-          {working && phase === 'ready' && (
-            <div className="flex h-7 items-center gap-2 text-[13px] text-muted" aria-live="polite">
-              <Loader2 className="size-3.5 animate-spin" />
-              {t.conv.working}
-            </div>
-          )}
+          {working && phase === 'ready' && <WorkingRow sinceMs={run.execution.since_ms} />}
           {phase === 'ready' && <BgStrip run={run} onJump={jumpToTool} />}
           {tail && (
             <div ref={tailRef} className="mt-3 space-y-2">
@@ -560,36 +583,61 @@ function ConversationSession({
           )}
         </div>
       </div>
-      {!atBottom && turns.length > 0 && (
-        <button
-          type="button"
-          aria-label={t.conv.jumpLatest}
-          title={t.conv.jumpLatest}
-          onClick={() => listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' })}
-          className="vk-focus absolute bottom-3 left-1/2 inline-flex size-8 -translate-x-1/2 items-center justify-center rounded-full border border-border bg-surface-2 text-muted shadow-[var(--shadow)] hover:text-fg"
-        >
-          <ArrowDown className="size-4" />
-        </button>
-      )}
-      {turns.length > 1 && (
-        <div className="absolute bottom-3 right-3 flex flex-col gap-1">
-          {([-1, 1] as const).map((dir) => (
-            <button
-              key={dir}
-              type="button"
-              aria-label={dir < 0 ? t.conv.prevSent : t.conv.nextSent}
-              title={dir < 0 ? t.conv.prevSent : t.conv.nextSent}
-              onClick={() => jumpUser(dir)}
-              className="vk-focus inline-flex size-8 items-center justify-center rounded-full border border-border bg-surface-2 text-muted opacity-80 shadow-[var(--shadow)] hover:text-fg hover:opacity-100 pointer-coarse:size-10"
-            >
-              {dir < 0 ? <ChevronsUp className="size-4" /> : <ChevronsDown className="size-4" />}
-            </button>
-          ))}
+      {turns.length > 0 && (turns.length > 1 || !atBottom) && (
+        <div className="pointer-events-none absolute bottom-2 right-2 flex flex-col items-center gap-1.5">
+          {turns.length > 1 && (
+            <FloatButton label={t.conv.prevSent} onClick={() => jumpUser(-1)}>
+              <ChevronsUp />
+            </FloatButton>
+          )}
+          {turns.length > 1 && !atBottom && (
+            <FloatButton label={t.conv.nextSent} onClick={() => jumpUser(1)}>
+              <ChevronsDown />
+            </FloatButton>
+          )}
+          {!atBottom && (
+            <FloatButton label={t.conv.jumpLatest} onClick={() => {
+                followRef.current = true;
+                listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' });
+              }} strong>
+              <ArrowDown />
+            </FloatButton>
+          )}
         </div>
       )}
     </div>
     </ImageSourceContext.Provider>
     </LinkContext.Provider>
+  );
+}
+
+/** One of the floating controls at the bottom right (jumps between prompts, to the latest). */
+function FloatButton({ label, onClick, strong, children }: { label: string; onClick(): void; strong?: boolean; children: ReactNode }) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+      className={cx(
+        'vk-focus pointer-events-auto inline-flex size-8 items-center justify-center rounded-full border border-border bg-surface-2/90 shadow-[var(--shadow)] backdrop-blur hover:text-fg pointer-coarse:size-9 [&_svg]:size-4',
+        strong ? 'text-fg' : 'text-muted',
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** The agent is at work: a spinner and how long the current turn has run. */
+function WorkingRow({ sinceMs }: { sinceMs: number }) {
+  const now = useNow(1000);
+  const ms = now - sinceMs;
+  return (
+    <div className="flex h-7 items-center gap-2 text-[13px] text-muted" aria-live="polite">
+      <Loader2 className="size-3.5 animate-spin" />
+      <span className="tabular-nums">{sinceMs > 0 && ms >= 1000 ? t.conv.workingFor(workedFor(ms)) : t.conv.working}</span>
+    </div>
   );
 }
 
@@ -613,7 +661,7 @@ const TurnView = memo(
       <section
         id={`turn-${turn.n}`}
         data-turn={turn.n}
-        className={cx('flex flex-col gap-3 py-2', !latest && '[contain-intrinsic-size:auto_320px] [content-visibility:auto]')}
+        className={cx('flex flex-col gap-3 py-2', !latest && 'conv-lazy')}
       >
         {groups.map((g) =>
           Array.isArray(g) ? (
@@ -663,6 +711,7 @@ function groupSteps(blocks: ConvBlock[]): (ConvBlock | StepBlock[])[] {
 function BlockView({ block }: { block: ConvBlock }) {
   if (block.k === 'user') return <UserMessage text={block.text} />;
   if (block.k === 'bg_event') return <BgEventRow status={block.status} summary={block.summary} />;
+  if (block.k === 'notice') return <NoticeRow notice={block.notice} />;
   if (block.k === 'image') return <TranscriptImage mime={block.mime} imageRef={block.ref} size={block.size} />;
   if (block.k === 'text')
     return (
@@ -689,6 +738,19 @@ function UserMessage({ text }: { text: string }) {
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+/** A harness notice: a quiet centred line between the messages. */
+function NoticeRow({ notice }: { notice: Notice }) {
+  const Icon = notice === 'interrupted' ? Square : Minimize2;
+  return (
+    <div className="flex items-center gap-2 text-xs text-faint" data-notice={notice}>
+      <span className="h-px flex-1 bg-border" />
+      <Icon className="size-3 shrink-0" />
+      <span className="shrink-0">{notice === 'interrupted' ? t.conv.interrupted : t.conv.compacted}</span>
+      <span className="h-px flex-1 bg-border" />
     </div>
   );
 }

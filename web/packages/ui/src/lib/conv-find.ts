@@ -3,7 +3,7 @@
 // parts that do not need the DOM.
 
 import type { TranscriptTurn } from '@vibeke/core';
-import { cleanUserText } from './conversation';
+import { cleanUserText, isConversationText, isInterruptText } from './conversation';
 
 /** Most hits marked at once. */
 export const MAX_HITS = 2000;
@@ -25,10 +25,10 @@ export function findMatches(text: string, q: string): [number, number][] {
 export function turnSearchText(turn: TranscriptTurn): string {
   const parts: string[] = [];
   for (const it of turn.items) {
-    if (it.kind !== 'text' || !it.text) continue;
+    if (!isConversationText(it) || !it.text) continue;
     if (it.role === 'user') {
       const t = cleanUserText(it.text);
-      if (t) parts.push(t);
+      if (t && !isInterruptText(t)) parts.push(t);
     } else if (it.text.trim()) parts.push(it.text);
   }
   return parts.join('\n');

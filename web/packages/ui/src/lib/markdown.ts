@@ -11,6 +11,8 @@ export type Inline =
   /** `rel`: a relative file link (`docs/a.md`); the renderer shows it as a link only where it can open files. */
   | { t: 'link'; href: string; c: Inline[]; rel?: true };
 
+export type Align = 'left' | 'center' | 'right' | null;
+
 export type Block =
   | { t: 'h'; level: number; c: Inline[] }
   | { t: 'p'; c: Inline[] }
@@ -18,6 +20,8 @@ export type Block =
   | { t: 'quote'; c: Block[] }
   | { t: 'list'; ordered: boolean; start: number; items: { checked: boolean | null; c: Block[] }[] }
   | { t: 'hr' }
+  /** A GitHub-style table; `align` per column, rows padded or cut to the header's width. */
+  | { t: 'table'; align: Align[]; head: Inline[][]; rows: Inline[][][] }
   /** Literal text (nesting/work limits reached): shown as-is, line breaks kept. */
   | { t: 'raw'; v: string };
 
@@ -145,6 +149,37 @@ export function parseInline(s: string, depth = 0, budget: Budget = new Budget())
 
 const LIST_RE = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/;
 
+/** A table's delimiter row: `| --- | :-: |` (outer pipes optional, one pipe at least). */
+const TABLE_SEP_RE = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+/** Most columns a table may have; wider ones stay text. */
+const MAX_COLS = 32;
+
+/** Cells of a table row: split on every `|` (as GitHub does, also inside code spans); `\\|` is a literal pipe. */
+export function tableCells(line: string): string[] {
+  let s = line.trim();
+  if (s.startsWith('|')) s = s.slice(1);
+  if (s.endsWith('|') && !s.endsWith('\\|')) s = s.slice(0, -1);
+  const cells: string[] = [];
+  let cur = '';
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === '\\' && s[i + 1] === '|') {
+      cur += '|';
+      i++;
+    } else if (s[i] === '|') {
+      cells.push(cur.trim());
+      cur = '';
+    } else cur += s[i];
+  }
+  cells.push(cur.trim());
+  return cells;
+}
+
+const isTableStart = (head: string, sep: string | undefined): boolean => {
+  if (sep === undefined || !head.includes('|') || !sep.includes('|') || !TABLE_SEP_RE.test(sep)) return false;
+  const n = tableCells(sep).length;
+  return n <= MAX_COLS && tableCells(head).length === n;
+};
+
 /**
  * Parse untrusted Markdown. Nesting deeper than MAX_DEPTH stays literal, and a document that
  * exceeds the work budget (or trips anything unexpected) is returned as one literal block, so
@@ -209,6 +244,25 @@ function parseBlocks(lines: string[], depth: number, budget: Budget): Block[] {
       const body: string[] = [];
       while (i < lines.length && /^\s*>/.test(lines[i]!)) body.push(lines[i++]!.replace(/^\s*> ?/, ''));
       out.push({ t: 'quote', c: parseBlocks(body, depth + 1, budget) });
+      continue;
+    }
+    if (isTableStart(line, lines[i + 1])) {
+      endPara();
+      const align: Align[] = tableCells(lines[i + 1]!).map((c) => (c.startsWith(':') ? (c.endsWith(':') ? 'center' : 'left') : c.endsWith(':') ? 'right' : null));
+      const width = align.length;
+      const row = (l: string) => {
+        const cells = tableCells(l).slice(0, width);
+        while (cells.length < width) cells.push('');
+        return cells.map(inline);
+      };
+      const head = row(line);
+      const rows: Inline[][][] = [];
+      i += 2;
+      while (i < lines.length && lines[i]!.trim() !== '' && lines[i]!.includes('|')) {
+        budget.charge(lines[i]!.length + 1);
+        rows.push(row(lines[i++]!));
+      }
+      out.push({ t: 'table', align, head, rows });
       continue;
     }
     const li = LIST_RE.exec(line);

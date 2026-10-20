@@ -327,6 +327,26 @@ fn apply(
                 stop,
                 ts_ms,
             } => {
+                // Claude sends no Stop hook when the user interrupts: the transcript is the
+                // only report. An interrupt older than the current state (a replay, or a prompt
+                // sent since) changes nothing.
+                if stop.as_deref() == Some(transcript::INTERRUPTED)
+                    && !headless::is_headless(&run)
+                    && matches!(
+                        run.execution.value,
+                        Execution::Working | Execution::Starting
+                    )
+                    && ts_ms.is_some_and(|t| t >= run.execution.since_ms)
+                {
+                    set_execution(
+                        server,
+                        run_id,
+                        Execution::Idle,
+                        StateSource::Structured,
+                        1.0,
+                        Some(transcript::INTERRUPTED.into()),
+                    );
+                }
                 let rec_id = format!("{run_id}:{id}");
                 let exists = server.with_core(|c| {
                     c.store

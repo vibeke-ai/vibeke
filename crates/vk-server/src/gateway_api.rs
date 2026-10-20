@@ -461,6 +461,31 @@ fn bg_event_item(v: &Value) -> Option<Value> {
     }))
 }
 
+fn has_tool_result(content: &Value) -> bool {
+    content.as_array().is_some_and(|a| {
+        a.iter()
+            .any(|c| c.get("type").and_then(Value::as_str) == Some("tool_result"))
+    })
+}
+
+/// A Claude user line that is a harness notice rather than a prompt: `interrupted` (the user
+/// stopped the turn) or `compacted` (the summary that continues a compacted conversation).
+fn claude_notice(v: &Value, content: Option<&Value>) -> Option<&'static str> {
+    if v.get("isCompactSummary").and_then(Value::as_bool) == Some(true) {
+        return Some("compacted");
+    }
+    let text = match content? {
+        Value::String(t) => t.as_str(),
+        Value::Array(a) => a
+            .iter()
+            .find(|c| c.get("type").and_then(Value::as_str) == Some("text"))?
+            .get("text")?
+            .as_str()?,
+        _ => return None,
+    };
+    vk_agents::transcript::is_interrupt_marker(text).then_some("interrupted")
+}
+
 /// Items from one transcript line, for Claude (`message.content[]`) and Codex rollout
 /// (`response_item` payloads). Returns (is_user_prompt, items).
 pub(crate) fn line_items(v: &Value) -> (bool, Vec<Value>) {
@@ -471,7 +496,26 @@ pub(crate) fn line_items(v: &Value) -> (bool, Vec<Value>) {
         return (true, vec![item]);
     }
     if let Some(msg) = v.get("message") {
-        let role = v.get("type").and_then(Value::as_str).unwrap_or("");
+        // Claude writes `user`/`assistant` lines; pi and omp write `message` lines with the role
+        // inside. Other lines with a `message` (Claude's `api-request-blob` copies of the API
+        // request: system prompt, reminders, earlier turns) are not part of the conversation.
+        let role = match v.get("type").and_then(Value::as_str) {
+            Some(r @ ("user" | "assistant")) => r,
+            Some("message") => msg.get("role").and_then(Value::as_str).unwrap_or(""),
+            _ => return (false, items),
+        };
+        let user_text = role == "user" && !msg.get("content").is_some_and(has_tool_result);
+        if user_text && let Some(n) = claude_notice(v, msg.get("content")) {
+            // Not a prompt: an interrupt ends the turn, a summary continues the conversation.
+            return (
+                n == "compacted",
+                vec![json!({"kind": "notice", "notice": n})],
+            );
+        }
+        // Text the harness adds to the conversation for the model (skill bodies, caveats).
+        if v.get("isMeta").and_then(Value::as_bool) == Some(true) {
+            return (false, items);
+        }
         match msg.get("content") {
             Some(Value::String(t)) => {
                 user_prompt = role == "user";
@@ -907,6 +951,55 @@ mod tests {
         assert!(!may_answer(&ctx("gateway", true, None)));
         assert!(!may_answer(&ctx("cli", false, None)));
         assert!(!may_answer(&ctx("tui", false, Some("p1"))));
+    }
+
+    #[test]
+    fn harness_bookkeeping_stays_out_of_the_conversation() {
+        let t = [
+            json!({"type": "user", "message": {"role": "user", "content": "go"}}),
+            // Claude's copy of the API request: system prompt, reminders, token counts.
+            json!({"type": "api-request-blob", "message": {"role": "system", "content": [{"type": "text", "text": "<total_tokens>9 tokens left</total_tokens>"}]}}),
+            json!({"type": "api-request-blob", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t0", "content": "old"}]}}),
+            json!({"type": "user", "isMeta": true, "message": {"role": "user", "content": [{"type": "text", "text": "Base directory for this skill"}]}}),
+            json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "on it"}]}}),
+            json!({"type": "user", "interruptedMessageId": "m1", "message": {"role": "user", "content": [{"type": "text", "text": "[Request interrupted by user]"}]}}),
+            json!({"type": "user", "isCompactSummary": true, "message": {"role": "user", "content": "This session is being continued…"}}),
+            json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "resumed"}]}}),
+            // pi: the role is inside the message.
+            json!({"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "pi prompt"}]}}),
+        ]
+        .iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let turns = transcript_items(&t);
+        let brief: Vec<Vec<String>> = turns
+            .iter()
+            .map(|t| {
+                t["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|i| match i["kind"].as_str().unwrap() {
+                        "text" => format!(
+                            "{}:{}",
+                            i["role"].as_str().unwrap(),
+                            i["text"].as_str().unwrap()
+                        ),
+                        "notice" => format!("notice:{}", i["notice"].as_str().unwrap()),
+                        k => k.to_string(),
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            brief,
+            [
+                vec!["user:go", "assistant:on it", "notice:interrupted"],
+                vec!["notice:compacted", "assistant:resumed"],
+                vec!["user:pi prompt"],
+            ]
+        );
     }
 
     #[test]

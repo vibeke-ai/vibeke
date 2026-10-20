@@ -26,11 +26,15 @@ export function bgEventStatus(s: string | null | undefined): BgEventStatus {
 
 export type Step = ToolStep | ThinkingStep;
 
+/** A harness notice in the conversation: the user stopped the turn, or the history was compacted. */
+export type Notice = 'interrupted' | 'compacted';
+
 export type ConvBlock =
   | { k: 'user'; key: string; text: string }
   | { k: 'image'; key: string; mime: string; ref: string; size: number | null }
   | { k: 'text'; key: string; text: string }
   | { k: 'bg_event'; key: string; id: string | null; toolUseId: string | null; status: BgEventStatus; summary: string }
+  | { k: 'notice'; key: string; notice: Notice }
   | Step
   | { k: 'steps'; key: string; steps: Step[] };
 
@@ -55,6 +59,27 @@ export function cleanUserText(text: string): string {
   return s.trim();
 }
 
+/** Claude's marker for a turn the user stopped (older hosts send it as a user prompt). */
+export const isInterruptText = (text: string): boolean => text.trimStart().startsWith('[Request interrupted by user');
+
+/**
+ * Text roles that belong to the conversation. Older hosts also passed on copies of the API
+ * request Claude logs (role `api-request-blob`: system prompt, reminders, token counts).
+ */
+const CONVERSATION_ROLES = new Set(['user', 'assistant', 'message', '']);
+
+/** A text item that is part of the conversation (not harness bookkeeping). */
+export const isConversationText = (it: TranscriptItem): boolean => it.kind === 'text' && CONVERSATION_ROLES.has(it.role ?? '');
+
+const noticeOf = (it: TranscriptItem): Notice | null => (it.kind === 'notice' && (it.notice === 'interrupted' || it.notice === 'compacted') ? it.notice : null);
+
+/** Did the user stop this turn (its last item is an interrupt)? */
+export function turnInterrupted(turn: TranscriptTurn): boolean {
+  const last = turn.items[turn.items.length - 1];
+  if (!last) return false;
+  return noticeOf(last) === 'interrupted' || (last.kind === 'text' && last.role === 'user' && isInterruptText(last.text ?? ''));
+}
+
 /** Blocks of one turn, before folding. */
 export function turnSteps(turn: TranscriptTurn): ConvBlock[] {
   const out: ConvBlock[] = [];
@@ -65,9 +90,11 @@ export function turnSteps(turn: TranscriptTurn): ConvBlock[] {
     switch (it.kind) {
       case 'text': {
         const raw = it.text ?? '';
+        if (!isConversationText(it)) return;
         if (it.role === 'user') {
           const text = cleanUserText(raw);
-          if (text) out.push({ k: 'user', key, text });
+          if (isInterruptText(text)) out.push({ k: 'notice', key, notice: 'interrupted' });
+          else if (text) out.push({ k: 'user', key, text });
         } else if (raw.trim()) out.push({ k: 'text', key, text: raw });
         lastTool = null;
         return;
@@ -89,7 +116,15 @@ export function turnSteps(turn: TranscriptTurn): ConvBlock[] {
         if (it.ref && isRasterMime(it.mime)) out.push({ k: 'image', key, mime: it.mime, ref: it.ref, size: typeof it.size === 'number' ? it.size : null });
         return;
       }
+      case 'notice': {
+        const n = noticeOf(it);
+        if (n) out.push({ k: 'notice', key, notice: n });
+        lastTool = null;
+        return;
+      }
       case 'tool_call': {
+        // A second copy of a call (older hosts repeated them from Claude's request log).
+        if (it.id && byId.has(it.id)) return;
         const step: ToolStep = { k: 'tool', key, call: it, result: null };
         if (it.id) byId.set(it.id, step);
         out.push(step);
@@ -99,7 +134,7 @@ export function turnSteps(turn: TranscriptTurn): ConvBlock[] {
       case 'tool_result': {
         const owner = (it.id ? byId.get(it.id) : undefined) ?? (lastTool && !lastTool.result && !it.id ? lastTool : undefined);
         if (owner && !owner.result) owner.result = it;
-        else out.push({ k: 'tool', key, call: null, result: it });
+        else if (!owner) out.push({ k: 'tool', key, call: null, result: it });
         return;
       }
       default:
@@ -111,12 +146,15 @@ export function turnSteps(turn: TranscriptTurn): ConvBlock[] {
 
 const isStep = (b: ConvBlock): b is Step => b.k === 'tool' || b.k === 'thinking';
 
-/** Fold runs of more than FOLD_OVER consecutive steps: the older ones become one "N steps" block. */
+/**
+ * Fold runs of more than FOLD_OVER consecutive steps: the older ones become one "N steps" block.
+ * In a completed turn every run of two or more steps folds; a single step stays a row.
+ */
 export function foldSteps(blocks: ConvBlock[], completed = false): ConvBlock[] {
   const out: ConvBlock[] = [];
   let run: Step[] = [];
   const flush = () => {
-    if (completed && run.length) {
+    if (completed && run.length > 1) {
       out.push({ k: 'steps', key: `steps:${run[0]!.key}`, steps: run });
     } else if (run.length > FOLD_OVER) {
       const hidden = run.slice(0, run.length - FOLD_KEEP);
@@ -172,12 +210,12 @@ export function turnStats(turn: TranscriptTurn): TurnStats {
 /** The assistant's words in a turn (Copy). */
 export const turnText = (turn: TranscriptTurn): string =>
   turn.items
-    .filter((i) => i.kind === 'text' && i.role !== 'user' && i.text?.trim())
+    .filter((i) => isConversationText(i) && i.role !== 'user' && i.text?.trim())
     .map((i) => i.text!.trim())
     .join('\n\n');
 
 /** Did the agent say or do anything in this turn (a footer is worth showing)? */
-export const turnHasWork = (turn: TranscriptTurn): boolean => turn.items.some((i) => i.kind !== 'bg_event' && (i.kind !== 'text' || i.role !== 'user'));
+export const turnHasWork = (turn: TranscriptTurn): boolean => turn.items.some((i) => (i.kind === 'text' ? isConversationText(i) && i.role !== 'user' : i.kind !== 'bg_event' && i.kind !== 'notice'));
 
 /** Tool call ids of a turn (to match a turn against the run's background tasks). */
 export const turnToolIds = (turn: TranscriptTurn): Set<string> => new Set(turn.items.filter((i) => i.kind === 'tool_call' && i.id).map((i) => i.id!));

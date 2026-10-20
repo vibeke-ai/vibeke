@@ -518,7 +518,7 @@ export interface Worktree {
   main: boolean;
 }
 
-export type TranscriptItemKind = 'text' | 'thinking' | 'tool_call' | 'tool_result' | 'image' | 'bg_event';
+export type TranscriptItemKind = 'text' | 'thinking' | 'tool_call' | 'tool_result' | 'image' | 'bg_event' | 'notice';
 
 /** One item of a transcript turn (server gateway_api.rs `line_items`). */
 export interface TranscriptItem {
@@ -546,6 +546,8 @@ export interface TranscriptItem {
   tool_use_id?: string | null;
   /** `bg_event`: `completed` | `failed` | `stopped` | `event`. */
   status?: string | null;
+  /** `notice`: `interrupted` (the user stopped the turn) | `compacted` (the history was summarized). */
+  notice?: string | null;
 }
 
 /** One transcript turn (`agent.transcript`): a user prompt and everything up to the next one. */

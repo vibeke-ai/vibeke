@@ -99,6 +99,34 @@ function BlockView({ b }: { b: Block }): ReactNode {
       return <hr />;
     case 'raw':
       return <p className="whitespace-pre-wrap">{b.v}</p>;
+    case 'table':
+      // Wide tables scroll sideways inside their own box, not the page.
+      return (
+        <div className="md-table">
+          <table>
+            <thead>
+              <tr>
+                {b.head.map((c, i) => (
+                  <th key={i} style={{ textAlign: b.align[i] ?? undefined }}>
+                    <InlineView nodes={c} />
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {b.rows.map((r, i) => (
+                <tr key={i}>
+                  {r.map((c, j) => (
+                    <td key={j} style={{ textAlign: b.align[j] ?? undefined }}>
+                      <InlineView nodes={c} />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
     case 'list': {
       const items = b.items.map((it, i) => (
         <li key={i}>

@@ -152,6 +152,13 @@ fn tag<'a>(s: &'a str, name: &str) -> Option<&'a str> {
     Some(s[a..b].trim())
 }
 
+/// Claude's marker for a turn the user stopped (`[Request interrupted by user]`, also `… for tool
+/// use]`): written as a user line, but it ends the turn rather than starting one.
+pub fn is_interrupt_marker(text: &str) -> bool {
+    text.trim_start()
+        .starts_with("[Request interrupted by user")
+}
+
 /// Parse text that is a `<task-notification>` block; `None` when it is anything else.
 pub fn parse_task_notification(text: &str) -> Option<TaskNotification> {
     let t = text.trim();
@@ -216,6 +223,9 @@ struct CodexCall {
     targets: Vec<String>,
     label: Option<String>,
 }
+
+/// `stop` of a turn the user interrupted.
+pub const INTERRUPTED: &str = "interrupted";
 
 /// What the transcript says the harness is doing right now (for `reconcile`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -651,7 +661,18 @@ impl Parser {
                     _ => {}
                 }
                 let meta = v.get("isMeta").and_then(Value::as_bool) == Some(true);
-                if had_text && !had_result && !sidechain && !meta {
+                let interrupted = had_text
+                    && !had_result
+                    && user_text(content).is_some_and(|t| is_interrupt_marker(&t));
+                if interrupted && !sidechain {
+                    // Esc: the turn ends without a stop reason (and without a Stop hook).
+                    let id = v
+                        .get("uuid")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("turn{}", self.turns_done + 1));
+                    self.finish_turn(id, Some(INTERRUPTED.into()), ts, out);
+                } else if had_text && !had_result && !sidechain && !meta {
                     if let Some(t) = user_text(content) {
                         self.prompt_seen(&t);
                     }
@@ -1954,6 +1975,30 @@ mod tests {
         let mut p = Parser::new(Format::ClaudeJsonl);
         p.feed(&lines(&claude_turn()[..1]));
         assert_eq!(p.activity(), Some(Activity::Working), "prompt submitted");
+    }
+
+    #[test]
+    fn claude_interrupt_ends_the_turn() {
+        let mut p = Parser::new(Format::ClaudeJsonl);
+        let mut v = claude_turn();
+        v.truncate(3);
+        v.push(serde_json::json!({"type":"user","uuid":"u9","timestamp":"2026-10-06T12:00:05Z","interruptedMessageId":"m1","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}));
+        let ev = p.feed(&lines(&v));
+        assert_eq!(p.activity(), Some(Activity::Idle));
+        let stops: Vec<Option<&str>> = ev
+            .iter()
+            .filter_map(|e| match e {
+                Event::Turn { stop, .. } => Some(stop.as_deref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stops, [Some(INTERRUPTED)]);
+        assert!(
+            !ev.iter()
+                .skip_while(|e| !matches!(e, Event::ToolUse { .. }))
+                .any(|e| matches!(e, Event::TurnStarted { .. })),
+            "an interrupt is not a prompt"
+        );
     }
 
     #[test]

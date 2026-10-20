@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { parseAnsi, stripAnsi } from '../src/lib/ansi';
 import { composerShowsStop, destructiveReason, isNoEchoPrompt } from '../src/lib/guards';
 import { NO_MODS, chord, cycleMod, isValidKey, keyLabel, press, queueAdd, queueRemoveAt } from '../src/lib/keys';
-import { MAX_DEPTH, parseInline, parseMarkdown, safeHref, type Block } from '../src/lib/markdown';
+import { MAX_DEPTH, parseInline, parseMarkdown, safeHref, tableCells, type Block } from '../src/lib/markdown';
 import { parseDiff, tokenize, langOf } from '../src/lib/highlight';
 import { nextPollDelay } from '../src/lib/poll';
 import { base64Std, shortDuration, shortPath } from '../src/lib/format';
@@ -91,6 +91,24 @@ describe('keys', () => {
 });
 
 describe('markdown', () => {
+  test('tables: header, alignment, ragged rows, escaped pipes', () => {
+    const b = parseMarkdown('Pages:\n\n| Page | Views |\n|---|--:|\n| `a\\|b` | 54 |\n| c |\n\nAfter');
+    expect(b.map((x) => x.t)).toEqual(['p', 'table', 'p']);
+    const t = b[1] as Extract<Block, { t: 'table' }>;
+    expect(t.align).toEqual([null, 'right']);
+    expect(t.head).toEqual([[{ t: 'text', v: 'Page' }], [{ t: 'text', v: 'Views' }]]);
+    expect(t.rows).toEqual([
+      [[{ t: 'code', v: 'a|b' }], [{ t: 'text', v: '54' }]],
+      [[{ t: 'text', v: 'c' }], []],
+    ]);
+    // A table may follow a paragraph line directly.
+    expect(parseMarkdown('Here:\n| a | b |\n| - | - |\n| 1 | 2 |').map((x) => x.t)).toEqual(['p', 'table']);
+    // Not a table: no delimiter row, or a column count that does not match.
+    expect(parseMarkdown('a | b\nc | d').map((x) => x.t)).toEqual(['p']);
+    expect(parseMarkdown('| a | b |\n| - |').map((x) => x.t)).toEqual(['p']);
+    expect(tableCells('| x | y \\| z |')).toEqual(['x', 'y | z']);
+  });
+
   test('adversarial nesting does not overflow the stack; deep content stays literal', () => {
     const t0 = Date.now();
     const b = parseMarkdown('> '.repeat(40000) + 'x');
