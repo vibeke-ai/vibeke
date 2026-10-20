@@ -174,6 +174,9 @@ export function tableCells(line: string): string[] {
   return cells;
 }
 
+/** A line that opens another block (heading, fence, quote, list, rule): it ends a table. */
+const startsBlock = (l: string): boolean => /^\s*(#{1,6}\s|```|~~~|>)/.test(l) || LIST_RE.test(l) || /^\s*([-*_])(\s*\1){2,}\s*$/.test(l);
+
 const isTableStart = (head: string, sep: string | undefined): boolean => {
   if (sep === undefined || !head.includes('|') || !sep.includes('|') || !TABLE_SEP_RE.test(sep)) return false;
   const n = tableCells(sep).length;
@@ -258,7 +261,7 @@ function parseBlocks(lines: string[], depth: number, budget: Budget): Block[] {
       const head = row(line);
       const rows: Inline[][][] = [];
       i += 2;
-      while (i < lines.length && lines[i]!.trim() !== '' && lines[i]!.includes('|')) {
+      while (i < lines.length && lines[i]!.trim() !== '' && lines[i]!.includes('|') && !startsBlock(lines[i]!)) {
         budget.charge(lines[i]!.length + 1);
         rows.push(row(lines[i++]!));
       }

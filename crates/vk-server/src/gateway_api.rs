@@ -504,6 +504,18 @@ pub(crate) fn line_items(v: &Value) -> (bool, Vec<Value>) {
             Some("message") => msg.get("role").and_then(Value::as_str).unwrap_or(""),
             _ => return (false, items),
         };
+        if role == "toolResult" {
+            // pi/omp: a tool's output is a message of its own.
+            items.push(transcript_result(
+                msg.get("content").unwrap_or(&Value::Null),
+                msg.get("toolCallId").unwrap_or(&Value::Null),
+                msg.get("isError").and_then(Value::as_bool).unwrap_or(false),
+            ));
+            for (k, (mime, data)) in line_images(v).into_iter().enumerate() {
+                items.push(image_item(k, &mime, data));
+            }
+            return (false, items);
+        }
         let user_text = role == "user" && !msg.get("content").is_some_and(has_tool_result);
         if user_text && let Some(n) = claude_notice(v, msg.get("content")) {
             // Not a prompt: an interrupt ends the turn, a summary continues the conversation.
@@ -541,6 +553,10 @@ pub(crate) fn line_items(v: &Value) -> (bool, Vec<Value>) {
                         }
                         Some("tool_use") => {
                             items.push(transcript_call(&c["name"], &c["input"], &c["id"]))
+                        }
+                        // pi/omp.
+                        Some("toolCall") => {
+                            items.push(transcript_call(&c["name"], &c["arguments"], &c["id"]))
                         }
                         Some("tool_result") => {
                             items.push(transcript_result(
@@ -965,8 +981,12 @@ mod tests {
             json!({"type": "user", "interruptedMessageId": "m1", "message": {"role": "user", "content": [{"type": "text", "text": "[Request interrupted by user]"}]}}),
             json!({"type": "user", "isCompactSummary": true, "message": {"role": "user", "content": "This session is being continued…"}}),
             json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "resumed"}]}}),
-            // pi: the role is inside the message.
+            // pi: the role is inside the message; a tool's output is a message of its own.
             json!({"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "pi prompt"}]}}),
+            json!({"type": "message", "message": {"role": "assistant", "content": [{"type": "toolCall", "id": "c1", "name": "bash", "arguments": {"command": "ls"}}]}}),
+            json!({"type": "message", "message": {"role": "toolResult", "toolCallId": "c1", "isError": false, "content": [{"type": "text", "text": "a b"}]}}),
+            // Quoting the marker is a prompt.
+            json!({"type": "user", "message": {"role": "user", "content": "[Request interrupted by user]\nwhy?"}}),
         ]
         .iter()
         .map(|v| v.to_string())
@@ -997,7 +1017,8 @@ mod tests {
             [
                 vec!["user:go", "assistant:on it", "notice:interrupted"],
                 vec!["notice:compacted", "assistant:resumed"],
-                vec!["user:pi prompt"],
+                vec!["user:pi prompt", "tool_call", "tool_result"],
+                vec!["user:[Request interrupted by user]\nwhy?"],
             ]
         );
     }

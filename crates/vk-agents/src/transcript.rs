@@ -152,11 +152,13 @@ fn tag<'a>(s: &'a str, name: &str) -> Option<&'a str> {
     Some(s[a..b].trim())
 }
 
-/// Claude's marker for a turn the user stopped (`[Request interrupted by user]`, also `… for tool
-/// use]`): written as a user line, but it ends the turn rather than starting one.
+/// Claude's marker for a turn the user stopped: written as a user line on its own, but it ends
+/// the turn rather than starting one. A prompt that quotes it is still a prompt.
 pub fn is_interrupt_marker(text: &str) -> bool {
-    text.trim_start()
-        .starts_with("[Request interrupted by user")
+    matches!(
+        text.trim(),
+        "[Request interrupted by user]" | "[Request interrupted by user for tool use]"
+    )
 }
 
 /// Parse text that is a `<task-notification>` block; `None` when it is anything else.

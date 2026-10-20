@@ -140,6 +140,10 @@ describe('harness noise and notices', () => {
     expect(turnSteps(now).map((b) => b.k)).toEqual(['user', 'notice']);
     expect(turnInterrupted(now)).toBe(true);
     expect(turnInterrupted({ n: 1, items: [{ kind: 'notice', notice: 'compacted' }, { kind: 'text', role: 'assistant', text: 'hi' }] })).toBe(false);
+    // Quoting the marker is a prompt.
+    const quoted: TranscriptTurn = { n: 3, items: [{ kind: 'text', role: 'user', text: '[Request interrupted by user]\nwhy?' }] };
+    expect(turnSteps(quoted).map((b) => b.k)).toEqual(['user']);
+    expect(turnInterrupted(quoted)).toBe(false);
   });
 
   test('a completed turn keeps a single step as a row', () => {

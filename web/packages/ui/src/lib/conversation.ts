@@ -59,14 +59,17 @@ export function cleanUserText(text: string): string {
   return s.trim();
 }
 
-/** Claude's marker for a turn the user stopped (older hosts send it as a user prompt). */
-export const isInterruptText = (text: string): boolean => text.trimStart().startsWith('[Request interrupted by user');
+/** Claude's marker for a turn the user stopped, on its own (older hosts send it as a user prompt). */
+export const isInterruptText = (text: string): boolean => {
+  const t = text.trim();
+  return t === '[Request interrupted by user]' || t === '[Request interrupted by user for tool use]';
+};
 
 /**
  * Text roles that belong to the conversation. Older hosts also passed on copies of the API
  * request Claude logs (role `api-request-blob`: system prompt, reminders, token counts).
  */
-const CONVERSATION_ROLES = new Set(['user', 'assistant', 'message', '']);
+const CONVERSATION_ROLES = new Set(['user', 'assistant', 'message', 'toolResult', '']);
 
 /** A text item that is part of the conversation (not harness bookkeeping). */
 export const isConversationText = (it: TranscriptItem): boolean => it.kind === 'text' && CONVERSATION_ROLES.has(it.role ?? '');

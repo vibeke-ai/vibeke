@@ -1793,6 +1793,10 @@ fn on_signal(server: &Arc<Server>, pane: &str, h: Harness, event: &str, p: &Valu
             let meta = json!({"prompt_bytes": prompt.len(), "prompt_digest": blake3::hash(prompt.as_bytes()).to_hex()[..16].to_string()});
             let started = now_ms();
             update_run(server, &run.id, |r, tx| {
+                // A prompt sent while the run still counts as working (an interrupt the
+                // transcript has not reported yet) starts the working time anew, so that late
+                // interrupt is seen as older than this turn.
+                r.execution.since_ms = started;
                 tx.event(
                     "agent.turn_started",
                     json!({"run": r.id, "pane": r.pane}),

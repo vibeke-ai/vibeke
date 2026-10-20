@@ -107,6 +107,8 @@ describe('markdown', () => {
     expect(parseMarkdown('a | b\nc | d').map((x) => x.t)).toEqual(['p']);
     expect(parseMarkdown('| a | b |\n| - |').map((x) => x.t)).toEqual(['p']);
     expect(tableCells('| x | y \\| z |')).toEqual(['x', 'y | z']);
+    // Another block ends the table.
+    expect(parseMarkdown('| a | b |\n| - | - |\n| 1 | 2 |\n# Use a | b | c').map((x) => x.t)).toEqual(['table', 'h']);
   });
 
   test('adversarial nesting does not overflow the stack; deep content stays literal', () => {
