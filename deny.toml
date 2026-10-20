@@ -4,6 +4,11 @@ all-features = false
 [advisories]
 version = 2
 yanked = "warn"
+ignore = [
+  # webpki-roots 0.26.11 (via tokio-tungstenite) only re-exports webpki-roots 1.x, which is at
+  # 1.0.10 with the emSign root removed. Drop this when tokio-tungstenite moves to 1.x.
+  { id = "RUSTSEC-2026-0381", reason = "0.26.11 re-exports the fixed webpki-roots 1.0.10" },
+]
 
 [licenses]
 version = 2
