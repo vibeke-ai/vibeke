@@ -115,10 +115,12 @@ test('conversation: transcript turns, tool rows, footer, composer, view toggle, 
   const log = page.getByRole('log', { name: 'Conversation' });
   await expect(log.locator('[data-role="user"]').filter({ hasText: 'Rebuild the homepage hero' })).toBeVisible({ timeout: 30_000 });
   await expect(log.getByText('Ready for review.')).toBeVisible();
-  // Completed turns keep every tool step behind one disclosure per group.
+  // Completed turns keep their tool steps behind one disclosure per group; a single step (turn
+  // 1) stays a row.
   const folded = log.locator('[data-turn="2"]').getByRole('button', { name: /^\d+ steps$/ });
   await expect(folded).toBeVisible();
-  await expect(log.locator('[data-tool="Bash"]')).toHaveCount(0);
+  await expect(log.locator('[data-turn="1"] [data-tool="Bash"]')).toHaveCount(1);
+  await expect(log.locator('[data-turn="2"] [data-tool="Bash"]')).toHaveCount(0);
   await folded.click();
   // Tool rows: label + mono summary, relative paths; more than five steps fold.
   const lastBash = log.locator('[data-tool="Bash"]').last();
