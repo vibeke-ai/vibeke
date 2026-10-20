@@ -332,19 +332,19 @@ fn apply(
                 // sent since) changes nothing.
                 if stop.as_deref() == Some(transcript::INTERRUPTED)
                     && !headless::is_headless(&run)
-                    && matches!(
-                        run.execution.value,
-                        Execution::Working | Execution::Starting
-                    )
-                    && ts_ms.is_some_and(|t| t >= run.execution.since_ms)
+                    && let Some(t) = *ts_ms
                 {
-                    set_execution(
+                    set_execution_if(
                         server,
                         run_id,
                         Execution::Idle,
                         StateSource::Structured,
                         1.0,
                         Some(transcript::INTERRUPTED.into()),
+                        |r| {
+                            matches!(r.execution.value, Execution::Working | Execution::Starting)
+                                && t >= r.execution.since_ms
+                        },
                     );
                 }
                 let rec_id = format!("{run_id}:{id}");

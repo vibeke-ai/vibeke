@@ -1002,9 +1002,23 @@ fn set_execution(
     conf: f32,
     detail: Option<String>,
 ) {
+    set_execution_if(server, run, to, source, conf, detail, |_| true);
+}
+
+/// [`set_execution`] when `cond` holds for the run as it is at the change (checked under the
+/// same lock, so a report that raced the check cannot be overwritten).
+fn set_execution_if(
+    server: &Server,
+    run: &str,
+    to: Execution,
+    source: StateSource,
+    conf: f32,
+    detail: Option<String>,
+    cond: impl Fn(&AgentRun) -> bool,
+) {
     let changed = std::cell::Cell::new(false);
     update_run(server, run, |r, tx| {
-        if r.execution.value == to && r.execution.source == source {
+        if (r.execution.value == to && r.execution.source == source) || !cond(r) {
             return;
         }
         changed.set(true);

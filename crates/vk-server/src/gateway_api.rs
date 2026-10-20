@@ -474,16 +474,18 @@ fn claude_notice(v: &Value, content: Option<&Value>) -> Option<&'static str> {
     if v.get("isCompactSummary").and_then(Value::as_bool) == Some(true) {
         return Some("compacted");
     }
+    // All of the text: a prompt that quotes the marker in one block is still a prompt.
     let text = match content? {
-        Value::String(t) => t.as_str(),
+        Value::String(t) => t.clone(),
         Value::Array(a) => a
             .iter()
-            .find(|c| c.get("type").and_then(Value::as_str) == Some("text"))?
-            .get("text")?
-            .as_str()?,
+            .filter(|c| c.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|c| c.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
         _ => return None,
     };
-    vk_agents::transcript::is_interrupt_marker(text).then_some("interrupted")
+    vk_agents::transcript::is_interrupt_marker(&text).then_some("interrupted")
 }
 
 /// Items from one transcript line, for Claude (`message.content[]`) and Codex rollout
@@ -985,8 +987,9 @@ mod tests {
             json!({"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "pi prompt"}]}}),
             json!({"type": "message", "message": {"role": "assistant", "content": [{"type": "toolCall", "id": "c1", "name": "bash", "arguments": {"command": "ls"}}]}}),
             json!({"type": "message", "message": {"role": "toolResult", "toolCallId": "c1", "isError": false, "content": [{"type": "text", "text": "a b"}]}}),
-            // Quoting the marker is a prompt.
+            // Quoting the marker is a prompt, also in a block of its own.
             json!({"type": "user", "message": {"role": "user", "content": "[Request interrupted by user]\nwhy?"}}),
+            json!({"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "[Request interrupted by user]"}, {"type": "text", "text": "how?"}]}}),
         ]
         .iter()
         .map(|v| v.to_string())
@@ -1019,6 +1022,7 @@ mod tests {
                 vec!["notice:compacted", "assistant:resumed"],
                 vec!["user:pi prompt", "tool_call", "tool_result"],
                 vec!["user:[Request interrupted by user]\nwhy?"],
+                vec!["user:[Request interrupted by user]", "user:how?"],
             ]
         );
     }
