@@ -70,4 +70,4 @@ regex.workspace = true
 toml.workspace = true
 rusqlite.workspace = true
 # api_schema_live: validate live results with a real JSON Schema 2020-12 validator (no network resolvers).
-jsonschema = { version = "0.58", default-features = false }
+jsonschema = { version = "0.59", default-features = false }
