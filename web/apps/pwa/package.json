@@ -14,15 +14,15 @@
   "dependencies": {
     "@vibeke/core": "workspace:*",
     "@vibeke/ui": "workspace:*",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.1.0",
+    "@tailwindcss/vite": "^4.3.5",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "*",
-    "tailwindcss": "^4.1.0",
+    "tailwindcss": "^4.3.5",
     "vite": "*",
     "vite-plugin-pwa": "*",
     "workbox-core": "^7.3.0",
