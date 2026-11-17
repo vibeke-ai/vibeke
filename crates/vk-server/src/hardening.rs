@@ -142,10 +142,21 @@ pub fn sweep_with(server: &Server, cfg: &EventsConfig) -> SweepReport {
     let g = crate::blob_store::gc(server, cfg.blob_days, false);
     r.blobs_removed = g.removed;
     r.blob_bytes = g.bytes;
-    // Give the pages the deletes freed back to the file system and empty the WAL.
-    match server.with_core(|c| c.store.maintain()) {
-        Ok(m) => r.maintain = m,
-        Err(e) => tracing::warn!(error = %e, "storage maintenance failed"),
+    // Give the pages the deletes freed back to the file system, one step per core-lock hold,
+    // then empty the WAL.
+    loop {
+        match server.with_core(|c| c.store.vacuum_step(vk_store::VACUUM_STEP_PAGES)) {
+            Ok(0) => break,
+            Ok(n) => r.maintain.freed_pages += n,
+            Err(e) => {
+                tracing::warn!(error = %e, "storage maintenance failed");
+                break;
+            }
+        }
+    }
+    match server.with_core(|c| c.store.checkpoint()) {
+        Ok(done) => r.maintain.wal_truncated = done,
+        Err(e) => tracing::warn!(error = %e, "WAL checkpoint failed"),
     }
     let removed = r.events.aged
         + r.events.capped

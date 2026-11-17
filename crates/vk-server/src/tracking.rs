@@ -366,16 +366,20 @@ const PRUNE_BATCH: usize = 2_000;
 /// the core lock per batch, so requests are not held up for the whole sweep. Returns the number
 /// of records removed.
 pub fn prune(server: &Server, cutoff_ms: i64) -> usize {
-    let bound: HashSet<String> = server
-        .with_core(|c| c.store.field_values(K_BINDING, "$.run_id", false))
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
     let mut removed = 0;
     for (kind, run_field) in [(K_ITEM, "$.run_id"), (K_TURN, "$.run")] {
         let mut after: Option<(i64, String)> = None;
         loop {
             let mut c = server.core.lock().unwrap();
+            // Read under the same lock as the delete: a run bound to a task while the sweep runs
+            // keeps its records. Without the list, nothing is deleted.
+            let bound: HashSet<String> = match c.store.field_values(K_BINDING, "$.run_id", false) {
+                Ok(v) => v.into_iter().collect(),
+                Err(e) => {
+                    tracing::warn!(error = %e, "tracking retention: bindings unreadable");
+                    return removed;
+                }
+            };
             let rows =
                 match c
                     .store

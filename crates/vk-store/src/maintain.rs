@@ -16,7 +16,7 @@ pub(crate) const DELETE_BATCH: i64 = 5_000;
 /// The WAL file is cut back to at most this many bytes when SQLite resets it.
 pub const WAL_SIZE_LIMIT: i64 = 64 * 1024 * 1024;
 /// Free pages returned per `incremental_vacuum` step (16 MiB with 4 KiB pages).
-const VACUUM_STEP_PAGES: i64 = 4_096;
+pub const VACUUM_STEP_PAGES: i64 = 4_096;
 
 /// What [`Store::compact_if_needed`] did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -67,33 +67,41 @@ impl Store {
         self.conn
             .pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
         self.conn.execute_batch("VACUUM")?;
-        self.checkpoint_truncate()?;
+        self.checkpoint()?;
         Ok(Some(CompactReport {
             bytes_before,
             bytes_after: self.file_bytes()?,
         }))
     }
 
-    /// Give free pages back to the file system and empty the WAL (after a retention sweep).
+    /// Give free pages back to the file system and empty the WAL, all at once. The server uses
+    /// [`Store::vacuum_step`] and [`Store::checkpoint`] instead, so it can release its lock
+    /// between steps.
     pub fn maintain(&self) -> Result<MaintainReport> {
         let mut freed = 0;
         loop {
-            let free = self.free_pages()?;
-            if free == 0 {
+            let n = self.vacuum_step(VACUUM_STEP_PAGES)?;
+            if n == 0 {
                 break;
             }
-            self.incremental_vacuum(free.min(VACUUM_STEP_PAGES))?;
-            let after = self.free_pages()?;
-            // No progress: auto-vacuum is off (a database still waiting for compaction).
-            if after >= free {
-                break;
-            }
-            freed += free - after;
+            freed += n;
         }
         Ok(MaintainReport {
             freed_pages: freed,
-            wal_truncated: self.checkpoint_truncate()?,
+            wal_truncated: self.checkpoint()?,
         })
+    }
+
+    /// Return up to `max_pages` free pages to the file system in one transaction. Returns the
+    /// number freed; `0` when none are left or auto-vacuum is off (a database still waiting for
+    /// compaction).
+    pub fn vacuum_step(&self, max_pages: i64) -> Result<i64> {
+        let free = self.free_pages()?;
+        if free == 0 {
+            return Ok(0);
+        }
+        self.incremental_vacuum(free.min(max_pages.max(1)))?;
+        Ok((free - self.free_pages()?).max(0))
     }
 
     /// Pages on the free list.
@@ -121,7 +129,7 @@ impl Store {
 
     /// `PRAGMA wal_checkpoint(TRUNCATE)`; `true` when it completed. In-memory databases have no
     /// WAL and report success.
-    fn checkpoint_truncate(&self) -> Result<bool> {
+    pub fn checkpoint(&self) -> Result<bool> {
         let busy: i64 = self
             .conn
             .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
@@ -376,6 +384,47 @@ mod tests {
             s.closed_before("tool_item", later, "$.nope", None, 10)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn closed_before_pages_through_rows_that_share_a_timestamp() {
+        let mut s = Store::open_in_memory().unwrap();
+        let mut m = Mutation::new();
+        // One mutation: every row gets the same `updated_at`.
+        for i in 0..25 {
+            m.close(
+                "tool_item",
+                &format!("t{i:02}"),
+                None,
+                &json!({"run_id": "r"}),
+            );
+        }
+        s.commit(m).unwrap();
+        let later = now_ms() + 1_000;
+        let mut after = None;
+        let mut seen = Vec::new();
+        loop {
+            let page = s
+                .closed_before("tool_item", later, "$.run_id", after.as_ref(), 10)
+                .unwrap();
+            let Some(last) = page.last() else { break };
+            after = Some((last.updated_at, last.id.clone()));
+            seen.extend(page.into_iter().map(|r| r.id));
+        }
+        assert_eq!(seen.len(), 25);
+        let mut sorted = seen.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted, seen, "each row once, in id order");
+        let plan: String = s
+            .conn
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT id FROM entities WHERE kind='tool_item' AND closed=1 AND updated_at < 5 AND (updated_at, id) > (1, 'a') ORDER BY updated_at, id LIMIT 3",
+                [],
+                |r| r.get(3),
+            )
+            .unwrap();
+        assert!(plan.contains("entities_closed"), "{plan}");
     }
 
     #[test]

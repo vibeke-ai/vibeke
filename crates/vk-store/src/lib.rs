@@ -17,7 +17,7 @@ pub use plugin_kv::{
 pub mod crypt;
 pub mod keychain;
 mod maintain;
-pub use maintain::{ClosedRow, CompactReport, MaintainReport, WAL_SIZE_LIMIT};
+pub use maintain::{ClosedRow, CompactReport, MaintainReport, VACUUM_STEP_PAGES, WAL_SIZE_LIMIT};
 mod purge;
 mod tombstone;
 pub use purge::{PurgeRecovery, PurgeReport, RebuildReport};
@@ -120,14 +120,16 @@ const MIGRATIONS: &[&str] = &[
     "#,
     // 7: lookups by run, turn and harness item id without scanning a kind's whole history. The
     // agent item stream grows by every tool call, and `load_by_field` on these paths ran under
-    // the core lock (see `INDEXED_FIELDS`). The last index serves retention of closed records.
+    // the core lock (see `INDEXED_FIELDS`). `entities_closed` pages retention of closed records by
+    // its `(updated_at, id)` cursor; `events_tier_seq` serves the row cap's oldest-first batches.
     r#"
     CREATE INDEX IF NOT EXISTS entities_run_id ON entities(kind, json_extract(json, '$.run_id'));
     CREATE INDEX IF NOT EXISTS entities_run ON entities(kind, json_extract(json, '$.run'));
     CREATE INDEX IF NOT EXISTS entities_turn_id ON entities(kind, json_extract(json, '$.turn_id'));
     CREATE INDEX IF NOT EXISTS entities_native_id ON entities(kind, json_extract(json, '$.native_id'));
     CREATE INDEX IF NOT EXISTS entities_task_id ON entities(kind, json_extract(json, '$.task_id'));
-    CREATE INDEX IF NOT EXISTS entities_closed ON entities(kind, closed, updated_at);
+    CREATE INDEX IF NOT EXISTS entities_closed ON entities(kind, closed, updated_at, id);
+    CREATE INDEX IF NOT EXISTS events_tier_seq ON events(tier, seq);
     "#,
 ];
 
