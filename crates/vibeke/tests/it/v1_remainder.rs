@@ -120,8 +120,15 @@ fn sync_input_mirrors_user_input_and_excludes_agents() {
     // c runs `cat` under the name `claude`. Process detection then agrees with the report
     // below; a plain `cat` would end the reported run as soon as c's first process status
     // arrived, and that status can come after the report.
+    // Linux links to dash instead: Ubuntu 26.04's `cat` is the uutils multi-call binary, which
+    // picks its tool from the name it runs under and exits when that name is `claude`.
     let fake = s.dir.path().join("claude");
-    std::os::unix::fs::symlink("/bin/cat", &fake).unwrap();
+    let target = if cfg!(target_os = "linux") {
+        "/bin/sh"
+    } else {
+        "/bin/cat"
+    };
+    std::os::unix::fs::symlink(target, &fake).unwrap();
     let c = s.split(&a, fake.to_str().unwrap());
     let mut r = rpc(&s);
     // c runs an agent: excluded unless included explicitly.
