@@ -14,7 +14,7 @@ pub struct Events {
     /// `sync`-tier events (catch-up and live UI) are pruned after this many days (default 7).
     pub sync_days: i64,
     /// `history`-tier events (interactions, policy, task status, agent start/exit) are kept this
-    /// many days (default 365).
+    /// many days (default 90).
     pub history_days: i64,
     /// Unreferenced uploads and tool-output payloads in the blob store are collected after this
     /// many days (default 30).
@@ -28,7 +28,7 @@ impl Default for Events {
     fn default() -> Self {
         Events {
             sync_days: 7,
-            history_days: 365,
+            history_days: 90,
             blob_days: 30,
             max_rows: 2_000_000,
         }

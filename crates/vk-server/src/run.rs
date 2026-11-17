@@ -118,6 +118,16 @@ pub async fn serve(server: Arc<Server>, listener: UnixListener) -> Result<()> {
     crate::mentions::start(&server);
     crate::assist::start(&server);
     crate::gateway_supervisor::start(&server);
+    // A database from before 0.23 is rebuilt once, after a restarting client (`vibeke update`)
+    // has seen this server answer: the rebuild holds the core lock while it runs.
+    let compact = server.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::hardening::compact_after_upgrade(&compact);
+        })
+        .await;
+    });
     let sd = server.clone();
     tokio::spawn(async move {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())

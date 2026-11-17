@@ -357,6 +357,61 @@ pub fn items_of(server: &Server, run: &str) -> Vec<vk_review::checks::ToolRecord
     })
 }
 
+/// Closed records deleted per retention batch (one core-lock hold and one commit each).
+const PRUNE_BATCH: usize = 2_000;
+
+/// Retention for observed turns and tool items (02 §2.3, `events.history_retention`): closed
+/// records last updated before `cutoff_ms` are removed, except those of runs bound to a task.
+/// Those are review evidence (15 §11) and only `forget` removes them. Works in batches and takes
+/// the core lock per batch, so requests are not held up for the whole sweep. Returns the number
+/// of records removed.
+pub fn prune(server: &Server, cutoff_ms: i64) -> usize {
+    let bound: HashSet<String> = server
+        .with_core(|c| c.store.field_values(K_BINDING, "$.run_id", false))
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let mut removed = 0;
+    for (kind, run_field) in [(K_ITEM, "$.run_id"), (K_TURN, "$.run")] {
+        let mut after: Option<(i64, String)> = None;
+        loop {
+            let mut c = server.core.lock().unwrap();
+            let rows =
+                match c
+                    .store
+                    .closed_before(kind, cutoff_ms, run_field, after.as_ref(), PRUNE_BATCH)
+                {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        tracing::warn!(error = %e, kind, "tracking retention failed");
+                        break;
+                    }
+                };
+            let Some(last) = rows.last() else { break };
+            after = Some((last.updated_at, last.id.clone()));
+            let mut tx = Tx::new();
+            let mut n = 0;
+            for r in &rows {
+                if r.field.as_ref().is_some_and(|run| bound.contains(run)) {
+                    continue;
+                }
+                tx.m.delete(kind, &r.id);
+                n += 1;
+            }
+            if n > 0 {
+                if server.commit(&mut c, tx).is_err() {
+                    break;
+                }
+                removed += n;
+            }
+            if rows.len() < PRUNE_BATCH {
+                break;
+            }
+        }
+    }
+    removed
+}
+
 // ---- bindings -----------------------------------------------------------------------------------
 
 /// Bindings of one run / one task / one native conversation (indexed JSON lookups, open and

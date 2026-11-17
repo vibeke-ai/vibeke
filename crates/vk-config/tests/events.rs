@@ -12,7 +12,7 @@ fn defaults_are_the_spec_values() {
     let e = Events::default();
     assert_eq!(
         (e.sync_days, e.history_days, e.blob_days, e.max_rows),
-        (7, 365, 30, 2_000_000)
+        (7, 90, 30, 2_000_000)
     );
     let (cfg, warnings) = parse("");
     assert_eq!(warnings, vec![]);
@@ -60,7 +60,7 @@ sync_retension = "1d"
     );
     let e = cfg.events();
     assert_eq!(e.sync_days, 3, "the good key still applies");
-    assert_eq!(e.history_days, 365);
+    assert_eq!(e.history_days, 90);
     assert_eq!(e.blob_days, 30);
     assert_eq!(e.max_rows, 2_000_000);
     let keys: Vec<&str> = w.iter().map(|w| w.key.as_str()).collect();

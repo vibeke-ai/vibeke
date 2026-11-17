@@ -179,6 +179,7 @@ impl ConvIndex {
     fn init(conn: Connection) -> Result<Self> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        crate::maintain::limit_wal(&conn)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if v > SCHEMA_VERSION {

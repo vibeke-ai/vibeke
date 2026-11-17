@@ -2,10 +2,12 @@
 //! cap, the pre-migration backup surface, and degraded-mode bookkeeping.
 //!
 //! - **Retention** (`[events]` in `config.toml`): `sync_retention` (default `7d`),
-//!   `history_retention` (`365d`) and `max_rows` (`2000000`, `0` = no cap). The hourly sweep
+//!   `history_retention` (`90d`) and `max_rows` (`2000000`, `0` = no cap). The hourly sweep
 //!   ([`sweep`]) prunes events (aged first, then the oldest `sync` rows over the cap, `history`
-//!   only when `sync` is gone), the Turn/Item stream of long-ended runs, and unreferenced old
-//!   blobs. `storage.prune` runs the same sweep on demand.
+//!   only when `sync` is gone), the Turn/Item stream of long-ended runs, closed observed turns
+//!   and tool items of runs without a task, closed collision records, and unreferenced old
+//!   blobs. It then returns free pages and empties the WAL (`Store::maintain`). `storage.prune`
+//!   runs the same sweep on demand.
 //! - **Backups**: the store copies `state.db` to `<state>/backups/` before it migrates (last 3
 //!   kept, `vk_store::backup`); `storage.status` lists them; `vibeke doctor --restore-backup`
 //!   restores one offline and rotates `log_epoch`.
@@ -109,8 +111,14 @@ impl EventsConfig {
 pub struct SweepReport {
     pub events: PruneReport,
     pub stream_removed: usize,
+    /// Closed observed turns and tool items of runs without a task (`tracking::prune`).
+    pub tracking_removed: usize,
+    /// Closed collision records past retention (`collision::prune`).
+    pub collisions_removed: usize,
     pub blobs_removed: usize,
     pub blob_bytes: u64,
+    /// Free pages returned and the WAL checkpoint (`Store::maintain`).
+    pub maintain: vk_store::MaintainReport,
 }
 
 /// The retention sweep (hourly, and `storage.prune`). Does nothing while storage is degraded.
@@ -129,19 +137,66 @@ pub fn sweep_with(server: &Server, cfg: &EventsConfig) -> SweepReport {
     }
     let cutoff = vk_store::now_ms() - cfg.retention.history_days * 86_400_000;
     r.stream_removed = crate::items::prune(server, cutoff);
+    r.tracking_removed = crate::tracking::prune(server, cutoff);
+    r.collisions_removed = crate::collision::prune(server, cutoff);
     let g = crate::blob_store::gc(server, cfg.blob_days, false);
     r.blobs_removed = g.removed;
     r.blob_bytes = g.bytes;
-    if r.events.aged + r.events.capped + r.stream_removed + r.blobs_removed > 0 {
+    // Give the pages the deletes freed back to the file system and empty the WAL.
+    match server.with_core(|c| c.store.maintain()) {
+        Ok(m) => r.maintain = m,
+        Err(e) => tracing::warn!(error = %e, "storage maintenance failed"),
+    }
+    let removed = r.events.aged
+        + r.events.capped
+        + r.stream_removed
+        + r.tracking_removed
+        + r.collisions_removed
+        + r.blobs_removed;
+    if removed > 0 || r.maintain.freed_pages > 0 {
         tracing::info!(
             aged = r.events.aged,
             capped = r.events.capped,
             stream = r.stream_removed,
+            tracking = r.tracking_removed,
+            collisions = r.collisions_removed,
             blobs = r.blobs_removed,
+            freed_pages = r.maintain.freed_pages,
+            wal_truncated = r.maintain.wal_truncated,
             "storage sweep"
         );
     }
     r
+}
+
+/// The one-time rebuild of a database created before incremental auto-vacuum (0.23), run in
+/// the background shortly after the server is ready (`vk_store::Store::compact_if_needed`). It
+/// holds the core lock while `VACUUM` runs (seconds), so it waits until a restarting client has
+/// seen the new server answer. Does nothing while storage is degraded.
+pub fn compact_after_upgrade(server: &Server) {
+    if server.degraded.lock().unwrap().is_some() {
+        return;
+    }
+    let needed = server.with_core(|c| c.store.needs_compaction());
+    if !matches!(needed, Ok(true)) {
+        return;
+    }
+    tracing::info!("compacting the state database once (it predates incremental auto-vacuum)");
+    let started = std::time::Instant::now();
+    // Retention first, so the rebuild does not copy rows the hourly sweep would remove anyway.
+    sweep(server);
+    match server.with_core(|c| c.store.compact_if_needed()) {
+        Ok(Some(r)) => tracing::info!(
+            bytes_before = r.bytes_before,
+            bytes_after = r.bytes_after,
+            ms = started.elapsed().as_millis() as u64,
+            "state database compacted"
+        ),
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "state database compaction failed; retrying at the next start")
+        }
+    }
 }
 
 /// The refusal for an interaction answer that cannot be recorded while storage is down: a

@@ -26,7 +26,7 @@ fn defaults_are_the_spec_values() {
     let r = Retention::default();
     assert_eq!(
         (r.sync_days, r.history_days, r.max_rows),
-        (7, 365, 2_000_000)
+        (7, 90, 2_000_000)
     );
 }
 

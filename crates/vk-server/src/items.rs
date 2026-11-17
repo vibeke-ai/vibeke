@@ -509,12 +509,13 @@ pub fn observe_hook(server: &Server, run: &AgentRun, event: &str, p: &Value) {
 
 /// Blob hashes referenced by item payloads (what `blob.gc` must keep).
 pub fn payload_refs(server: &Server) -> HashSet<String> {
+    // Only the one field: decoding every item held the core lock for as long as the stream is
+    // long.
     server.with_core(|c| {
         c.store
-            .load::<Item>(K_ITEM)
+            .field_values(K_ITEM, "$.payload_ref", true)
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|i| i.payload_ref)
             .collect()
     })
 }

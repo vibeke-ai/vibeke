@@ -17,7 +17,7 @@ fn parse(src: &str) -> EventsConfig {
 fn events_config_defaults_match_the_spec() {
     let c = parse("");
     assert_eq!(c.retention.sync_days, 7);
-    assert_eq!(c.retention.history_days, 365);
+    assert_eq!(c.retention.history_days, 90);
     assert_eq!(c.retention.max_rows, 2_000_000);
     assert_eq!(c, EventsConfig::default());
 }
@@ -398,4 +398,120 @@ fn every_3d_method_is_registered_and_pane_scope_is_declared() {
     assert!(crate::session_api::is_mutating("blob.gc"));
     assert!(!crate::session_api::is_mutating("storage.status"));
     assert!(!crate::session_api::is_mutating("agent.items"));
+}
+
+#[test]
+fn tracking_retention_keeps_open_records_and_task_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), "track");
+    {
+        let mut c = s.core.lock().unwrap();
+        let mut tx = Tx::new();
+        tx.m.put(
+            crate::tracking::K_BINDING,
+            "b1",
+            None,
+            &json!({"run_id": "bound", "task_id": "t1"}),
+        );
+        for (i, run) in ["free", "free", "bound"].iter().enumerate() {
+            tx.m.close(
+                crate::tracking::K_ITEM,
+                &format!("item-{i}"),
+                None,
+                &json!({"run_id": run}),
+            );
+            tx.m.close(
+                crate::tracking::K_TURN,
+                &format!("turn-{i}"),
+                None,
+                &json!({"run": run, "n": i}),
+            );
+        }
+        tx.m.put(
+            crate::tracking::K_ITEM,
+            "item-open",
+            None,
+            &json!({"run_id": "free"}),
+        );
+        s.commit(&mut c, tx).unwrap();
+    }
+    // Nothing is old enough yet.
+    assert_eq!(crate::tracking::prune(&s, 0), 0);
+    let removed = crate::tracking::prune(&s, vk_store::now_ms() + 60_000);
+    assert_eq!(
+        removed, 4,
+        "two closed items and two closed turns of the free run"
+    );
+    let left: Vec<String> = s.with_core(|c| {
+        let mut v: Vec<Value> = c
+            .store
+            .load_by_field(crate::tracking::K_ITEM, "$.run_id", "free")
+            .unwrap();
+        v.extend(
+            c.store
+                .load_by_field::<Value>(crate::tracking::K_ITEM, "$.run_id", "bound")
+                .unwrap(),
+        );
+        v.extend(
+            c.store
+                .load_by_field::<Value>(crate::tracking::K_TURN, "$.run", "bound")
+                .unwrap(),
+        );
+        v.iter()
+            .map(|v| {
+                v["run_id"]
+                    .as_str()
+                    .or(v["run"].as_str())
+                    .unwrap()
+                    .to_string()
+            })
+            .collect()
+    });
+    assert_eq!(left, ["free", "bound", "bound"]);
+}
+
+#[test]
+fn collision_retention_keeps_open_records_and_recent_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), "coll");
+    {
+        let mut c = s.core.lock().unwrap();
+        let mut tx = Tx::new();
+        for i in 0..205 {
+            tx.m.close(
+                crate::collision::K_COLLISION,
+                &format!("c{i:03}"),
+                None,
+                &json!({"id": format!("c{i:03}")}),
+            );
+        }
+        tx.m.put(
+            crate::collision::K_COLLISION,
+            "open",
+            None,
+            &json!({"id": "open"}),
+        );
+        s.commit(&mut c, tx).unwrap();
+    }
+    // Only the surplus over the listed history goes while nothing is past retention.
+    assert_eq!(crate::collision::prune(&s, 0), 5);
+    // Past retention: every closed record goes; the open one stays.
+    assert_eq!(
+        crate::collision::prune(&s, vk_store::now_ms() + 60_000),
+        200
+    );
+    let open: Vec<Value> = s.with_core(|c| c.store.load(crate::collision::K_COLLISION).unwrap());
+    assert_eq!(open.len(), 1);
+}
+
+#[test]
+fn the_sweep_checkpoints_the_wal() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = server(dir.path(), "wal");
+    emit(&s, 50);
+    let r = sweep(&s);
+    assert!(r.maintain.wal_truncated, "{r:?}");
+    let mut wal = s.paths.db().into_os_string();
+    wal.push("-wal");
+    assert_eq!(std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0), 0);
 }

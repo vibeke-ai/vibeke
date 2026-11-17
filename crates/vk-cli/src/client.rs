@@ -227,6 +227,11 @@ pub async fn connect_or_spawn(session: &str, socket: &Path, no_spawn: bool) -> R
     }
     let wait = Duration::from_secs(if alive { 10 } else { 5 });
     let mut deadline = Instant::now() + wait;
+    // A server that holds the state lock but does not answer yet is usually still opening its
+    // database (a schema migration after an upgrade takes its pre-migration backup first): keep
+    // waiting for it up to this long, and say so once.
+    let patience = Instant::now() + STARTING_SERVER_PATIENCE;
+    let mut told = false;
     loop {
         check_socket_trust(socket)?;
         if let Ok(s) = UnixStream::connect(socket).await {
@@ -239,6 +244,15 @@ pub async fn connect_or_spawn(session: &str, socket: &Path, no_spawn: bool) -> R
             spawn_server(session)?;
             deadline = Instant::now() + Duration::from_secs(5);
         }
+        if Instant::now() > deadline && Instant::now() < patience && server_alive(session) {
+            if !told {
+                eprintln!(
+                    "vibeke: waiting for the server of session {session} to start (it may be upgrading its database)"
+                );
+                told = true;
+            }
+            deadline = Instant::now() + Duration::from_secs(1);
+        }
         if Instant::now() > deadline {
             let log = Paths::new(session).logs().join("server.log");
             if alive {
@@ -248,11 +262,14 @@ pub async fn connect_or_spawn(session: &str, socket: &Path, no_spawn: bool) -> R
                     log.display()
                 );
             }
-            bail!("server did not start within 5 s (see {})", log.display());
+            bail!("server did not start in time (see {})", log.display());
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
+
+/// How long a client waits for a server that holds the state lock but does not answer yet.
+const STARTING_SERVER_PATIENCE: Duration = Duration::from_secs(120);
 
 /// Is a server (or `doctor --rebuild-index`) holding the session's state lock? Probing takes
 /// the lock for an instant when it is free; a starting server retries it, so that is harmless.

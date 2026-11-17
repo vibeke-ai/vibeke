@@ -16,6 +16,8 @@ pub use plugin_kv::{
 };
 pub mod crypt;
 pub mod keychain;
+mod maintain;
+pub use maintain::{ClosedRow, CompactReport, MaintainReport, WAL_SIZE_LIMIT};
 mod purge;
 mod tombstone;
 pub use purge::{PurgeRecovery, PurgeReport, RebuildReport};
@@ -116,7 +118,41 @@ const MIGRATIONS: &[&str] = &[
         status TEXT NOT NULL, started_at INTEGER NOT NULL, ended_at INTEGER, json TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS plugin_commands_plugin ON plugin_commands(plugin_id, started_at);
     "#,
+    // 7: lookups by run, turn and harness item id without scanning a kind's whole history. The
+    // agent item stream grows by every tool call, and `load_by_field` on these paths ran under
+    // the core lock (see `INDEXED_FIELDS`). The last index serves retention of closed records.
+    r#"
+    CREATE INDEX IF NOT EXISTS entities_run_id ON entities(kind, json_extract(json, '$.run_id'));
+    CREATE INDEX IF NOT EXISTS entities_run ON entities(kind, json_extract(json, '$.run'));
+    CREATE INDEX IF NOT EXISTS entities_turn_id ON entities(kind, json_extract(json, '$.turn_id'));
+    CREATE INDEX IF NOT EXISTS entities_native_id ON entities(kind, json_extract(json, '$.native_id'));
+    CREATE INDEX IF NOT EXISTS entities_task_id ON entities(kind, json_extract(json, '$.task_id'));
+    CREATE INDEX IF NOT EXISTS entities_closed ON entities(kind, closed, updated_at);
+    "#,
 ];
+
+/// JSON paths with an expression index on `entities` (migrations 3 and 7). [`Store::load_by_field`]
+/// writes these paths into its SQL as literals: SQLite uses an expression index only for the
+/// same expression, and a bound parameter is not the same expression.
+const INDEXED_FIELDS: &[&str] = &[
+    "$.task",
+    "$.run_id",
+    "$.run",
+    "$.turn_id",
+    "$.native_id",
+    "$.task_id",
+];
+
+/// Row mapper for queries whose first column is an entity's JSON (one function, so both
+/// branches of a query share the iterator type).
+fn json_column(r: &rusqlite::Row<'_>) -> rusqlite::Result<String> {
+    r.get(0)
+}
+
+/// The indexed expression for `path`, if it has one.
+fn indexed_field(path: &str) -> Option<&'static str> {
+    INDEXED_FIELDS.iter().copied().find(|p| *p == path)
+}
 
 /// Event-log retention (02 §2.3): `events.sync_retention`, `events.history_retention` and the
 /// row cap (`events.max_rows`).
@@ -132,7 +168,7 @@ impl Default for Retention {
     fn default() -> Self {
         Retention {
             sync_days: 7,
-            history_days: 365,
+            history_days: 90,
             max_rows: 2_000_000,
         }
     }
@@ -519,8 +555,12 @@ impl Store {
     }
 
     fn init(conn: Connection, dir: Option<&Path>, db: Option<&Path>) -> Result<Self> {
+        // Before the first table exists, so a new database uses it at once; an older database
+        // keeps its mode until `compact_if_needed` rebuilds it (`maintain.rs`).
+        conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        maintain::limit_wal(&conn)?;
         conn.pragma_update(None, "foreign_keys", "OFF")?;
         // Deleted rows (`state.forget`, retention) are overwritten, not left in free pages.
         conn.pragma_update(None, "secure_delete", "ON")?;
@@ -779,17 +819,29 @@ impl Store {
 
     /// Every entity of `kind` (open and closed) whose JSON value at `path` (e.g.
     /// `$.acceptance.task_id`) equals `value`, in insertion order. Filters inside SQLite, so
-    /// only matching rows are decoded; not indexed beyond `kind`.
+    /// only matching rows are decoded. Paths in [`INDEXED_FIELDS`] use their expression index;
+    /// other paths scan the kind.
     pub fn load_by_field<T: DeserializeOwned>(
         &self,
         kind: &str,
         path: &str,
         value: &str,
     ) -> Result<Vec<T>> {
-        let mut st = self.conn.prepare(
-            "SELECT json FROM entities WHERE kind=?1 AND json_extract(json, ?2)=?3 ORDER BY rowid",
-        )?;
-        let rows = st.query_map(params![kind, path, value], |r| r.get::<_, String>(0))?;
+        let mut st;
+        let rows = match indexed_field(path) {
+            Some(field) => {
+                st = self.conn.prepare_cached(&format!(
+                    "SELECT json FROM entities WHERE kind=?1 AND json_extract(json, '{field}')=?2 ORDER BY rowid"
+                ))?;
+                st.query_map(params![kind, value], json_column)?
+            }
+            None => {
+                st = self.conn.prepare_cached(
+                    "SELECT json FROM entities WHERE kind=?1 AND json_extract(json, ?2)=?3 ORDER BY rowid",
+                )?;
+                st.query_map(params![kind, path, value], json_column)?
+            }
+        };
         let mut out = Vec::new();
         for r in rows {
             out.push(serde_json::from_str(&r?)?);
@@ -990,30 +1042,50 @@ impl Store {
     /// `history` rows. The newest row is never removed, so `seq` can't restart below its past.
     pub fn prune_with(&self, r: &Retention) -> Result<PruneReport> {
         let now = now_ms();
-        let aged = self.conn.execute(
-            "DELETE FROM events WHERE ((tier='sync' AND ts < ?1) OR (tier='history' AND ts < ?2))
-               AND seq < (SELECT MAX(seq) FROM events)",
-            params![
-                now - r.sync_days.saturating_mul(86_400_000),
-                now - r.history_days.saturating_mul(86_400_000)
-            ],
-        )?;
+        // In batches, each its own transaction: one large delete would have to fit in the WAL
+        // as a whole (and `secure_delete` writes every freed page again).
+        let mut aged = 0;
+        loop {
+            let n = self.conn.execute(
+                "DELETE FROM events WHERE seq IN (
+                   SELECT seq FROM events
+                    WHERE ((tier='sync' AND ts < ?1) OR (tier='history' AND ts < ?2))
+                      AND seq < (SELECT MAX(seq) FROM events)
+                    LIMIT ?3)",
+                params![
+                    now - r.sync_days.saturating_mul(86_400_000),
+                    now - r.history_days.saturating_mul(86_400_000),
+                    maintain::DELETE_BATCH
+                ],
+            )?;
+            aged += n;
+            if (n as i64) < maintain::DELETE_BATCH {
+                break;
+            }
+        }
         let mut capped = 0;
         if r.max_rows > 0 {
             for tier in ["sync", "history"] {
                 let count: i64 = self
                     .conn
                     .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
-                let excess = count - r.max_rows;
+                let mut excess = count - r.max_rows;
+                while excess > 0 {
+                    let n = self.conn.execute(
+                        "DELETE FROM events WHERE seq IN (
+                           SELECT seq FROM events WHERE tier=?1 AND seq < (SELECT MAX(seq) FROM events)
+                           ORDER BY seq LIMIT ?2)",
+                        params![tier, excess.min(maintain::DELETE_BATCH)],
+                    )?;
+                    if n == 0 {
+                        break;
+                    }
+                    capped += n;
+                    excess -= n as i64;
+                }
                 if excess <= 0 {
                     break;
                 }
-                capped += self.conn.execute(
-                    "DELETE FROM events WHERE seq IN (
-                       SELECT seq FROM events WHERE tier=?1 AND seq < (SELECT MAX(seq) FROM events)
-                       ORDER BY seq LIMIT ?2)",
-                    params![tier, excess],
-                )?;
             }
         }
         Ok(PruneReport { aged, capped })

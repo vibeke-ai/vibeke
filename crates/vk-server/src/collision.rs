@@ -637,6 +637,38 @@ pub fn start(server: &Arc<Server>) {
     watch::spawn(server);
 }
 
+/// Retention for closed collision records (02 §2.3): records closed before `cutoff_ms`
+/// (`events.history_retention`) and records past the newest [`MAX_HISTORY`] closed ones (never
+/// listed again) are removed. Open records stay. Returns the number removed.
+pub fn prune(server: &Server, cutoff_ms: i64) -> usize {
+    let mut c = server.core.lock().unwrap();
+    // Collision records have no run field; the store reports it as absent.
+    let rows = match c
+        .store
+        .closed_before(K_COLLISION, i64::MAX, "$.run_id", None, usize::MAX >> 1)
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "collision retention failed");
+            return 0;
+        }
+    };
+    // Oldest first: everything before the newest MAX_HISTORY, and anything older than cutoff.
+    let surplus = rows.len().saturating_sub(MAX_HISTORY);
+    let mut tx = Tx::new();
+    let mut n = 0;
+    for (i, r) in rows.iter().enumerate() {
+        if i < surplus || r.updated_at < cutoff_ms {
+            tx.m.delete(K_COLLISION, &r.id);
+            n += 1;
+        }
+    }
+    if n == 0 || server.commit(&mut c, tx).is_err() {
+        return 0;
+    }
+    n
+}
+
 /// The periodic sweep (also run by [`watch`]'s worker): drop paths quiet for a window, clear
 /// records left with none, with fewer than two live runs or whose checkout is no longer tracked,
 /// forget touches and in-flight calls of ended runs, release their claims, drop expired ignores.
