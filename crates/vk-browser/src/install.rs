@@ -701,9 +701,12 @@ mod tests {
                 Ok(())
             })
             .unwrap_err();
+            // Our own check names the link; a newer `unzip` (macOS runners) refuses an unsafe
+            // link itself and fails first. Either way nothing is installed.
+            let msg = format!("{e:#}");
             assert!(
-                format!("{e:#}").contains("points outside"),
-                "{target}: {e:#}"
+                msg.contains("points outside") || msg.contains("unzip failed"),
+                "{target}: {msg}"
             );
             assert!(!pl.dir.exists());
             assert!(std::fs::read_dir(&root).unwrap().next().is_none());
