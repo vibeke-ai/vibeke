@@ -8,9 +8,7 @@ fi
 if [[ -r "${ZDOTDIR-$HOME}/.zshenv" ]]; then
   source "${ZDOTDIR-$HOME}/.zshenv"
 fi
-__vibeke_shim_path_once() {
-  precmd_functions=(${precmd_functions:#__vibeke_shim_path_once})
-  [[ "$path[1]" == "$VIBEKE_SHIM_DIR" ]] || path=("$VIBEKE_SHIM_DIR" "$path[@]")
-  unfunction __vibeke_shim_path_once
-}
-precmd_functions+=(__vibeke_shim_path_once)
+# A login profile or directory-change hook may put a version manager first in PATH.
+if (( ! ${+functions[codex]} && ! ${+aliases[codex]} )); then
+  function codex { "$VIBEKE_SHIM_DIR/codex" "$@"; }
+fi

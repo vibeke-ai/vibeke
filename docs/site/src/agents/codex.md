@@ -28,7 +28,7 @@ vibeke integration install codex --yes
 3. Run `/hooks` in Codex once and trust the Vibeke hooks. Codex ignores hooks that you have not trusted.
 4. Start `codex` in a new Vibeke pane. Open **Conversation** in the desktop or browser app to read the session.
 
-On a host with a supported Codex daemon, each pane connects to the shared daemon through its own local socket. Vibeke reads the conversation that Codex opens through that socket. Use the Codex terminal to answer approval requests in this mode. Run `codex --no-daemon` to use pane hooks and inbox approvals.
+On a host with a supported Codex daemon, each pane connects to the shared daemon through its own local socket. Vibeke reads the conversation that Codex opens through that socket. Use the Codex terminal to answer approval requests in this mode. Run `codex --no-daemon` for pane hooks, inbox approvals, claim enforcement and pane-scoped Vibeke commands. If a previous Vibeke version started your daemon inside a pane, restart the daemon from an ordinary host terminal before using shared mode.
 
 ## Files it changes
 

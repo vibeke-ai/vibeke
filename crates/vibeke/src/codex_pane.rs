@@ -2,6 +2,7 @@
 //! the foreground process and owns all requests, including approvals.
 use anyhow::{Context, Result, bail};
 use futures::{SinkExt, StreamExt};
+use semver::Version;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
@@ -25,60 +26,197 @@ pub fn run(args: &[String]) -> Result<()> {
     }
     let (real, args) = args.split_first().context("missing Codex executable")?;
     let mut cli = Command::new(real);
-    let (sub, rest) = match args.split_first() {
-        Some((sub, rest)) if matches!(sub.as_str(), "resume" | "fork") => (Some(sub), rest),
-        _ => (None, args),
+    let subcommand = first_positional(args);
+    let verb = subcommand.and_then(|i| args.get(i)).map(String::as_str);
+    let daemon_management = matches!(
+        verb,
+        Some("app" | "remote-control" | "agents" | "queue" | "archive" | "unarchive" | "delete")
+    ) || (verb == Some("app-server")
+        && args[subcommand.unwrap() + 1..]
+            .iter()
+            .any(|a| a == "daemon"));
+    let embedded = args.iter().any(|a| a == "--no-daemon");
+    let explicit_daemon = args
+        .iter()
+        .any(|a| a == "daemon_auto_start" || a.starts_with("features.daemon_auto_start="));
+    let bypass = std::env::var("CODEX_VIBEKE_SHIM").as_deref() == Ok("0");
+    if daemon_management || bypass || explicit_daemon {
+        if daemon_management || !embedded {
+            strip_pane_env(&mut cli);
+        }
+        return Err(cli.args(args).exec().into());
+    }
+    if embedded
+        || args.iter().any(|a| {
+            matches!(
+                a.as_str(),
+                "--remote" | "--help" | "-h" | "--version" | "-V"
+            ) || a.starts_with("--remote=")
+        })
+    {
+        return Err(cli.args(args).exec().into());
+    }
+    if matches!(verb, Some("exec" | "e" | "review")) {
+        return Err(cli
+            .args(["--disable", "daemon_auto_start"])
+            .args(args)
+            .exec()
+            .into());
+    }
+    if matches!(
+        verb,
+        Some(
+            "app-server"
+                | "mcp"
+                | "mcp-server"
+                | "exec-server"
+                | "agents"
+                | "queue"
+                | "archive"
+                | "unarchive"
+                | "delete"
+                | "plugin"
+                | "migrate-rollouts"
+                | "migrate-nfs-db"
+                | "doctor"
+                | "update"
+                | "login"
+                | "logout"
+                | "completion"
+                | "help"
+                | "features"
+                | "sandbox"
+                | "apply"
+                | "cloud"
+                | "debug"
+                | "proxy"
+        )
+    ) {
+        return Err(cli.args(args).exec().into());
+    }
+    let split = if matches!(verb, Some("resume" | "fork")) {
+        subcommand.unwrap() + 1
+    } else {
+        0
     };
-    cli.args(sub);
+    let (prefix, rest) = args.split_at(split);
+    cli.args(prefix);
     // These options select a local launch context which a remote TUI cannot reproduce.
-    let local = rest.iter().any(|a| {
+    let local = args.iter().any(|a| {
         matches!(a.as_str(), "--worktree" | "--oss" | "--profile" | "-p")
             || a.starts_with("--profile=")
     });
     if !local && let Ok(endpoint) = start_proxy(real) {
         cli.arg("--remote").arg(endpoint);
-        if !rest
+        if !args
             .iter()
             .any(|a| a == "--cd" || a.starts_with("--cd=") || a.starts_with("-C"))
         {
             cli.arg("--cd").arg(std::env::current_dir()?);
         }
-    } else {
+    } else if Command::new(real)
+        .args(["--no-daemon", "--version"])
+        .stdin(Stdio::null())
+        .output()?
+        .status
+        .success()
+    {
         cli.arg("--no-daemon");
+    } else {
+        cli.args(["--disable", "daemon_auto_start"]);
     }
     Err(cli.args(rest).exec().into())
 }
 
+// Skip values belonging to options, so e.g. `-m model resume ID` still places
+// connection flags after the subcommand and a prompt after `--` stays a prompt.
+fn first_positional(args: &[String]) -> Option<usize> {
+    let mut words = args.iter().enumerate();
+    while let Some((i, arg)) = words.next() {
+        match arg.as_str() {
+            "--" => return None,
+            "-c"
+            | "--config"
+            | "--enable"
+            | "--disable"
+            | "-m"
+            | "--model"
+            | "-p"
+            | "--profile"
+            | "-s"
+            | "--sandbox"
+            | "-a"
+            | "--ask-for-approval"
+            | "-C"
+            | "--cd"
+            | "-i"
+            | "--image"
+            | "--local-provider"
+            | "--add-dir"
+            | "--remote"
+            | "--remote-auth-token-env" => {
+                words.next();
+            }
+            flag if flag.starts_with('-') => {}
+            _ => return Some(i),
+        }
+    }
+    None
+}
+
+fn strip_pane_env(cmd: &mut Command) {
+    for (key, _) in std::env::vars_os() {
+        let name = key.to_string_lossy();
+        if name == "VIBEKE"
+            || name.starts_with("VIBEKE_")
+            || name.starts_with("HERDR_")
+            || name == "BASH_FUNC_codex%%"
+        {
+            cmd.env_remove(key);
+        }
+    }
+}
+
 fn start_proxy(real: &str) -> Result<String> {
+    let version = Command::new(real).arg("--version").output()?;
+    let version = String::from_utf8_lossy(&version.stdout);
+    if !supported(version.split_whitespace().last()) {
+        bail!("Codex lacks the tested foreground thread protocol");
+    }
     let home = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| vk_server::paths::home().join(".codex"));
-    let socket = home.join("app-server-control/app-server-control.sock");
-    if std::os::unix::net::UnixStream::connect(&socket).is_err() {
-        // Respect a user's disabled auto-start setting. The daemon outlives this pane:
-        // do not give it this pane's identity or an elevated Vibeke credential.
-        let mut daemon = Command::new(real);
-        for (key, _) in std::env::vars_os() {
-            let name = key.to_string_lossy();
-            if name == "VIBEKE" || name.starts_with("VIBEKE_") || name.starts_with("HERDR_") {
-                daemon.env_remove(key);
-            }
-        }
-        let features = Command::new(real).args(["features", "list"]).output()?;
-        if !String::from_utf8_lossy(&features.stdout).lines().any(|l| {
-            let mut words = l.split_whitespace();
-            words.next() == Some("daemon_auto_start") && words.last() == Some("true")
-        }) || !daemon
-            .args(["app-server", "daemon", "start"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?
-            .success()
-        {
-            bail!("shared daemon unavailable");
-        }
+    let mut manager = Command::new(real);
+    manager.args(["app-server", "daemon"]).stdin(Stdio::null());
+    // The daemon outlives the pane. Its hooks must never inherit a pane credential.
+    strip_pane_env(&mut manager);
+    if home.is_absolute() {
+        manager.current_dir(vk_server::paths::home());
     }
+    let control = home.join("app-server-control/app-server-control.sock");
+    let operation = if std::os::unix::net::UnixStream::connect(&control).is_ok() {
+        "version"
+    } else {
+        let features = Command::new(real).args(["features", "list"]).output()?;
+        if !String::from_utf8_lossy(&features.stdout)
+            .lines()
+            .any(|line| {
+                let mut fields = line.split_whitespace();
+                fields.next() == Some("daemon_auto_start") && fields.last() == Some("true")
+            })
+        {
+            bail!("Codex daemon auto-start is disabled");
+        }
+        "start"
+    };
+    let status = manager.arg(operation).output()?;
+    let info: Value = serde_json::from_slice(&status.stdout)?;
+    if !status.status.success() || !supported(info["appServerVersion"].as_str()) {
+        bail!("incompatible Codex daemon");
+    }
+    let socket = info["socketPath"]
+        .as_str()
+        .context("missing daemon socket")?;
     let mut worker = Command::new(std::env::current_exe()?)
         .args(["codex-pane", "--serve", &std::process::id().to_string()])
         .arg(socket)
@@ -94,6 +232,12 @@ fn start_proxy(real: &str) -> Result<String> {
         bail!("proxy failed to start");
     }
     Ok(endpoint.trim_end().into())
+}
+
+fn supported(version: Option<&str>) -> bool {
+    version
+        .and_then(|v| Version::parse(v).ok())
+        .is_some_and(|v| v >= Version::new(0, 169, 0))
 }
 
 async fn serve_pane(parent: u32, upstream: &Path) -> Result<()> {
@@ -147,6 +291,9 @@ impl Threads {
     }
 
     fn response(&mut self, frame: &Message) -> Option<Value> {
+        if self.requests.is_empty() {
+            return None;
+        }
         let m = message(frame)?;
         if m.get("method").is_some() || !self.requests.remove(&m.get("id")?.to_string()) {
             return None;
@@ -198,8 +345,14 @@ async fn report_bindings(pid: u32, mut rx: watch::Receiver<Option<Value>>) {
             let payload = rx.borrow_and_update().clone();
             let rpc = async {
                 let socket = std::env::var_os("VIBEKE_SOCKET").context("missing pane socket")?;
-                let mut c = vk_cli::client::Client::new(UnixStream::connect(socket).await?);
-                c.hello("agent").await?;
+                let mut c =
+                    vk_cli::client::Client::new(vk_cli::client::connect(Path::new(&socket)).await?);
+                c.call(
+                    "client.hello",
+                    json!({"kind":"agent","client":"vibeke-codex-pane",
+                    "version":vk_proto::VERSION,"token":std::env::var("VIBEKE_PANE_TOKEN")?}),
+                )
+                .await?;
                 c.call(
                     "adapter.signal",
                     json!({"harness":"codex","event":"SessionStart","pid":pid,"payload":payload}),

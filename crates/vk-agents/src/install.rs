@@ -1682,6 +1682,13 @@ if [ -z "$real" ]; then
     exit 127
 fi
 
+# Older running servers share this directory but do not advertise the launch helper.
+if [ "${VIBEKE_CODEX_PANE:-}" = 1 ] && [ -n "${VIBEKE_PANE_TOKEN:-}" ] &&
+   [ -z "${VIBEKE_ISOLATION:-}" ] && [ -z "${VIBEKE_HEADLESS_OWNER:-}" ] &&
+   [ -x "${VIBEKE_BIN:-}" ]; then
+    exec "$VIBEKE_BIN" codex-pane "$real" "$@"
+fi
+
 if [ "${CODEX_VIBEKE_SHIM:-1}" = "0" ]; then
     exec "$real" "$@"
 fi
@@ -1713,24 +1720,13 @@ for a in "$@"; do
     esac
 done
 
-interactive() {
-    extra=$(no_daemon_extra)
-    if [ "$extra" = "--no-daemon" ] && [ -n "${VIBEKE_PANE_TOKEN:-}" ] &&
-       [ -z "${VIBEKE_ISOLATION:-}" ] && [ -z "${VIBEKE_HEADLESS_OWNER:-}" ] &&
-       [ -x "${VIBEKE_BIN:-}" ]; then
-        exec "$VIBEKE_BIN" codex-pane "$real" "$@"
-    fi
-    case "${1:-}" in
-        resume|fork) sub=$1; shift; exec "$real" "$sub" $extra "$@" ;;
-        *) exec "$real" $extra "$@" ;;
-    esac
-}
-
 set -f
 case "${1:-}" in
     # Subcommands that take the extra flags after the subcommand name.
     resume|fork)
-        interactive "$@"
+        sub=$1
+        shift
+        exec "$real" "$sub" $(no_daemon_extra) "$@"
         ;;
     exec|review)
         sub=$1
@@ -1742,7 +1738,7 @@ case "${1:-}" in
         exec "$real" "$@"
         ;;
     *)
-        interactive "$@"
+        exec "$real" $(no_daemon_extra) "$@"
         ;;
 esac
 "##;

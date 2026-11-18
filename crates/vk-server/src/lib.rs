@@ -288,21 +288,26 @@ fn prepare_login_shell(argv: &mut Vec<String>, env: &mut Vec<(String, String)>) 
         "VIBEKE_SHIM_DIR".into(),
         shims.to_string_lossy().into_owned(),
     ));
-    match std::path::Path::new(&argv[0]).file_name().and_then(|s|s.to_str()) {
+    match std::path::Path::new(&argv[0])
+        .file_name()
+        .and_then(|s| s.to_str())
+    {
         Some("zsh") if shims.join("zsh/.zshenv").is_file() => {
-            if let Some((key, _)) = env.iter_mut().find(|(k,_)|k=="ZDOTDIR") {
-                *key="VIBEKE_ORIGINAL_ZDOTDIR".into();
+            if let Some((key, _)) = env.iter_mut().find(|(k, _)| k == "ZDOTDIR") {
+                *key = "VIBEKE_ORIGINAL_ZDOTDIR".into();
             }
-            env.push(("ZDOTDIR".into(),shims.join("zsh").to_string_lossy().into_owned()));
+            env.push((
+                "ZDOTDIR".into(),
+                shims.join("zsh").to_string_lossy().into_owned(),
+            ));
         }
-        Some("fish") => argv.extend(["-C".into(), r#"if test "$PATH[1]" != "$VIBEKE_SHIM_DIR"; set -gx PATH "$VIBEKE_SHIM_DIR" $PATH; end"#.into()]),
-        Some("bash") => {
-            let mut prompt = String::from(r#"case "$PATH:" in "$VIBEKE_SHIM_DIR:"*) ;; *) export PATH="$VIBEKE_SHIM_DIR:$PATH";; esac"#);
-            if let Some(i) = env.iter().position(|(k,_)|k=="PROMPT_COMMAND") {
-                prompt.push('\n');
-                prompt.push_str(&env.remove(i).1);
-            }
-            env.push(("PROMPT_COMMAND".into(),prompt));
+        Some("fish") => {
+            argv.extend(["-C".into(), r#"if not functions -q codex; function codex; "$VIBEKE_SHIM_DIR/codex" $argv; end; end"#.into()]);
+        }
+        Some("bash") if !env.iter().any(|(k, _)| k == "BASH_FUNC_codex%%") => {
+            // Bash imports exported functions before reading its login profiles. A user's
+            // alias or function in those profiles still takes precedence.
+            env.push(("BASH_FUNC_codex%%".into(), r#"() { if test -x "${VIBEKE_SHIM_DIR:-}/codex" && test -n "${VIBEKE_SHIM_DIR:-}"; then "$VIBEKE_SHIM_DIR/codex" "$@"; else command codex "$@"; fi; }"#.into()));
         }
         _ => {}
     }
@@ -910,6 +915,7 @@ impl Server {
         }
         if self.opts.shims {
             let shims = Paths::shims();
+            set(&mut env, "VIBEKE_CODEX_PANE", "1".into());
             if shims.is_dir() {
                 let path = env
                     .iter()
