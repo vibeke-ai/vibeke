@@ -1709,17 +1709,28 @@ no_daemon_extra() {
 # talking to the daemon / app-server directly.
 for a in "$@"; do
     case "$a" in
-        --*daemon*|daemon_*|features.daemon*) exec "$real" "$@" ;;
+        --*daemon*|daemon_*|features.daemon*|--remote|--remote=*|--help|-h|--version|-V) exec "$real" "$@" ;;
     esac
 done
+
+interactive() {
+    extra=$(no_daemon_extra)
+    if [ "$extra" = "--no-daemon" ] && [ -n "${VIBEKE_PANE_TOKEN:-}" ] &&
+       [ -z "${VIBEKE_ISOLATION:-}" ] && [ -z "${VIBEKE_HEADLESS_OWNER:-}" ] &&
+       [ -x "${VIBEKE_BIN:-}" ]; then
+        exec "$VIBEKE_BIN" codex-pane "$real" "$@"
+    fi
+    case "${1:-}" in
+        resume|fork) sub=$1; shift; exec "$real" "$sub" $extra "$@" ;;
+        *) exec "$real" $extra "$@" ;;
+    esac
+}
 
 set -f
 case "${1:-}" in
     # Subcommands that take the extra flags after the subcommand name.
     resume|fork)
-        sub=$1
-        shift
-        exec "$real" "$sub" $(no_daemon_extra) "$@"
+        interactive "$@"
         ;;
     exec|review)
         sub=$1
@@ -1727,11 +1738,11 @@ case "${1:-}" in
         exec "$real" "$sub" $VIBEKE_CODEX_EXTRA "$@"
         ;;
     # Management subcommands: pass through untouched.
-    app-server|login|logout|mcp|proxy|completion|help|features|sandbox|apply|cloud|debug)
+    app-server|app|agents|remote-control|login|logout|mcp|mcp-server|proxy|completion|help|features|sandbox|apply|cloud|debug|doctor|update|queue|archive|unarchive|delete|plugin|migrate-*|exec-server|e)
         exec "$real" "$@"
         ;;
     *)
-        exec "$real" $(no_daemon_extra) "$@"
+        interactive "$@"
         ;;
 esac
 "##;
@@ -1747,6 +1758,13 @@ pub fn write_codex_shim(shim_dir: &Path) -> Result<PathBuf> {
     if !up_to_date {
         atomic_write(&path, CODEX_SHIM.as_bytes(), 0o755)?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+    }
+    let zsh = shim_dir.join("zsh");
+    fs::create_dir_all(&zsh)?;
+    let init = zsh.join(".zshenv");
+    let source = include_bytes!("codex-pane.zshenv");
+    if !fs::read(&init).is_ok_and(|bytes| bytes == source) {
+        atomic_write(&init, source, 0o644)?;
     }
     Ok(path)
 }

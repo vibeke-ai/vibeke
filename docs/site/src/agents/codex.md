@@ -26,13 +26,15 @@ vibeke integration install codex --yes
 ```
 
 3. Run `/hooks` in Codex once and trust the Vibeke hooks. Codex ignores hooks that you have not trusted.
-4. Start `codex` in a Vibeke pane.
+4. Start `codex` in a new Vibeke pane. Open **Conversation** in the desktop or browser app to read the session.
+
+On a host with a supported Codex daemon, each pane connects to the shared daemon through its own local socket. Vibeke reads the conversation that Codex opens through that socket. Use the Codex terminal to answer approval requests in this mode. Run `codex --no-daemon` to use pane hooks and inbox approvals.
 
 ## Files it changes
 
 - `~/.codex/hooks.json`, or `hooks.json` in the directory named by `CODEX_HOME`. Each Vibeke entry runs `vibeke hook codex <Event>`. Vibeke finds its own entries by that command and keeps your other hooks.
 - Before the first change, it saves a copy named `hooks.json.vibeke-bak-<timestamp>`.
-- A small `codex` script in the `shims` folder of the Vibeke data directory. Panes put this folder first in `PATH` while `agents.shims` is `true`. The script runs your real `codex` with `--disable daemon_auto_start`. When your Codex knows the `--no-daemon` option, the script adds it for the interactive session, `resume` and `fork`. Hooks then run in the pane and not in a shared Codex daemon. Set `CODEX_VIBEKE_SHIM=0` to skip the script for one command.
+- A small `codex` script in the `shims` folder of the Vibeke data directory. Panes put this folder first in `PATH` while `agents.shims` is `true`. The script connects interactive sessions to the local Codex daemon. Isolated panes and older Codex versions use the embedded server when available. Set `CODEX_VIBEKE_SHIM=0` to use your Codex command directly.
 - `~/.agents/skills/vibeke/SKILL.md` holds the Vibeke skill. It teaches Codex the `vibeke` commands for panes, agents, tasks, previews, the agent browser and images. pi, oh-my-pi, OpenCode and Gemini CLI read the same file. A line after the header of the skill marks it as managed by Vibeke. A reinstall overwrites it. The installer does not replace a `vibeke` skill without that line.
 
 The installer prints the shim path when it writes the script.

@@ -278,6 +278,36 @@ pub fn shell_argv(opts: &ServerOpts) -> Vec<String> {
     vec![shell, "-l".into()]
 }
 
+// Login profiles often put an installer or version manager ahead of the pane's PATH.
+fn prepare_login_shell(argv: &mut Vec<String>, env: &mut Vec<(String, String)>) {
+    let shims = Paths::shims();
+    if !shims.join("codex").is_file() {
+        return;
+    }
+    env.push((
+        "VIBEKE_SHIM_DIR".into(),
+        shims.to_string_lossy().into_owned(),
+    ));
+    match std::path::Path::new(&argv[0]).file_name().and_then(|s|s.to_str()) {
+        Some("zsh") if shims.join("zsh/.zshenv").is_file() => {
+            if let Some((key, _)) = env.iter_mut().find(|(k,_)|k=="ZDOTDIR") {
+                *key="VIBEKE_ORIGINAL_ZDOTDIR".into();
+            }
+            env.push(("ZDOTDIR".into(),shims.join("zsh").to_string_lossy().into_owned()));
+        }
+        Some("fish") => argv.extend(["-C".into(), r#"if test "$PATH[1]" != "$VIBEKE_SHIM_DIR"; set -gx PATH "$VIBEKE_SHIM_DIR" $PATH; end"#.into()]),
+        Some("bash") => {
+            let mut prompt = String::from(r#"case "$PATH:" in "$VIBEKE_SHIM_DIR:"*) ;; *) export PATH="$VIBEKE_SHIM_DIR:$PATH";; esac"#);
+            if let Some(i) = env.iter().position(|(k,_)|k=="PROMPT_COMMAND") {
+                prompt.push('\n');
+                prompt.push_str(&env.remove(i).1);
+            }
+            env.push(("PROMPT_COMMAND".into(),prompt));
+        }
+        _ => {}
+    }
+}
+
 /// Variables a caller's launch environment cannot set: the pane's own identity, its terminal
 /// type and the Herdr aliases (Herdr sets its identity after the extra environment too).
 fn pane_identity_key(k: &str) -> bool {
@@ -735,11 +765,18 @@ impl Server {
         } else {
             None
         };
-        let (argv, env, isolation) = match run_box {
+        let (mut argv, mut env, isolation) = match run_box {
             Some(w) => w,
             None => sandbox::wrap_spawn(self, pane_id, &cwd, argv, env, ws_task)
                 .context("prepare isolated spawn")?,
         };
+        if self.opts.shims
+            && isolation.level == IsolationLevel::Host
+            && argv.len() == 2
+            && argv[1] == "-l"
+        {
+            prepare_login_shell(&mut argv, &mut env);
+        }
         let spec = SpawnSpec {
             pane_id: pane_id.to_string(),
             socket: socket.clone(),

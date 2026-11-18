@@ -352,7 +352,7 @@ async fn run_server(g: &Global) -> i32 {
     opts.env
         .extend(cfg.terminal.env.iter().map(|(k, v)| (k.clone(), v.clone())));
     if opts.shims {
-        let _ = vk_server::agents::install_shims(&opts.bin);
+        let _ = vk_agents::write_codex_shim(&vk_server::paths::Paths::shims());
     }
     // The state dir's writer lock, for the server's whole life (02): a running
     // `doctor --rebuild-index` holds it, and a server that is still shutting down may for a

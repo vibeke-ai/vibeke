@@ -235,22 +235,6 @@ pub fn start(server: &Arc<Server>) {
     }
 }
 
-/// Write PATH shims (04 §6.2): `codex` → adds `--disable daemon_auto_start` so the TUI runs a
-/// per-pane embedded app-server whose hooks carry this pane's identity.
-pub fn install_shims(bin: &std::path::Path) -> std::io::Result<()> {
-    let dir = crate::paths::Paths::shims();
-    std::fs::create_dir_all(&dir)?;
-    let script = harness::codex_shim_script();
-    let path = dir.join("codex");
-    if std::fs::read_to_string(&path).ok().as_deref() != Some(script.as_str()) {
-        std::fs::write(&path, &script)?;
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
-    }
-    let _ = bin;
-    Ok(())
-}
-
 fn source_of(s: &str) -> StateSource {
     match s {
         "screen" => StateSource::Screen,

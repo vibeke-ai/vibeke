@@ -7,6 +7,7 @@ use vk_cli::{EXIT_NO_SERVER, EXIT_OK, EXIT_USAGE, Global};
 
 mod account_cmd;
 mod cloud_cmd;
+mod codex_pane;
 mod commands;
 mod config_cmd;
 mod debug;
@@ -136,6 +137,14 @@ fn parse_global(args: &mut Vec<String>) -> Result<Global, String> {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|s| s == "codex-pane") {
+        let result = codex_pane::run(&args[1..]);
+        if let Err(e) = result {
+            eprintln!("vibeke codex: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     // The holder must fork before any threads exist.
     if args.first().map(String::as_str) == Some("hold") {
         let get = |k: &str| {
