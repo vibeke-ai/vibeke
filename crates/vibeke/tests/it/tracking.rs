@@ -234,8 +234,24 @@ fn track_after_the_fact() {
     );
 
     // Unsafe send: a draft in the input box → refused with zero bytes.
-    let _ = s.cmd(&["pane", "send-text", &pane, "half typed"]).output();
-    std::thread::sleep(Duration::from_millis(300));
+    // Delivery is acknowledged at UserPromptSubmit. The harness still has to finish
+    // the turn and draw its next input box before terminal echo can land in that box.
+    s.until("input box after the clarification", 15, || {
+        let screen = s.api("pane.read", json!({"pane": pane})).ok()?;
+        let screen = screen["text"].as_str()?.trim_end();
+        (screen.contains("working on: Please add the regression test first.")
+            && screen.ends_with("│ >"))
+        .then_some(())
+    });
+    s.json(&["pane", "send-text", &pane, "half typed"]);
+    s.until("draft in the current input box", 15, || {
+        let screen = s.api("pane.read", json!({"pane": pane})).ok()?;
+        screen["text"]
+            .as_str()?
+            .trim_end()
+            .ends_with("│ > half typed")
+            .then_some(())
+    });
     let prep2 = s
         .api(
             "task.message.prepare",
