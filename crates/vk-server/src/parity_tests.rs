@@ -45,7 +45,10 @@ fn env() -> Env {
         bin: "/bin/false".into(),
         hold_args: vec![],
         default_shell: None,
-        env: vec![("TERM_PROGRAM".into(), "ghostty".into())],
+        env: vec![
+            ("TERM_PROGRAM".into(), "ghostty".into()),
+            ("CLAUDE_CODE_CHILD_SESSION".into(), "1".into()),
+        ],
         shims: false,
         gateway: None,
     };
@@ -53,6 +56,17 @@ fn env() -> Env {
         server: Server::new(paths, opts).unwrap(),
         _dir: dir,
     }
+}
+
+#[test]
+fn pane_env_drops_inherited_claude_child_marker() {
+    let e = env();
+    let vars = e.server.pane_env("pane-a", "p1", "t1", "w1", &[]);
+    assert!(!vars.iter().any(|(k, _)| k == "CLAUDE_CODE_CHILD_SESSION"));
+    assert!(
+        vars.iter()
+            .any(|(k, v)| k == "TERM_PROGRAM" && v == "ghostty")
+    );
 }
 
 fn user() -> Ctx {

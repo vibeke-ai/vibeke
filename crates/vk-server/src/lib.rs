@@ -824,12 +824,15 @@ impl Server {
             .iter()
             // Never leak an outer Herdr/Vibeke pane identity into our panes (would make Herdr's
             // hooks report into the real Herdr session).
+            // Claude Code treats an inherited child-session marker as a reason to skip
+            // transcript saving, even when the user starts a separate session in a new pane.
             .filter(|(k, _)| {
                 !k.starts_with("HERDR_")
                     && !k.starts_with("VIBEKE_")
                     && k != "VIBEKE"
                     && k != "TMUX"
                     && k != "TMUX_PANE"
+                    && k != "CLAUDE_CODE_CHILD_SESSION"
             })
             .cloned()
             .collect();
