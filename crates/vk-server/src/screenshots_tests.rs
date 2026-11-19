@@ -679,7 +679,7 @@ async fn retention_by_age_and_count_keeps_referenced_screenshots() {
         };
         let mut c = e.server.core.lock().unwrap();
         let mut tx = Tx::new();
-        tx.m.put("review_acceptance", "acc-1", None, &rec);
+        tx.m.close("review_acceptance", "acc-1", None, &rec);
         e.server.commit(&mut c, tx).unwrap();
     }
     assert!(referenced_by_acceptance(

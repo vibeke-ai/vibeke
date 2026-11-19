@@ -65,7 +65,7 @@ const K_SUBJECT: &str = "review_subject";
 const K_CAND: &str = "review_candidate";
 const K_END: &str = "binding_end";
 const K_PROJ: &str = "review_projection";
-pub(crate) const K_ACCEPT: &str = "review_acceptance";
+const K_ACCEPT: &str = "review_acceptance";
 const K_GRANT: &str = "check_grant";
 const K_CHECK: &str = "check_run";
 const K_PREF: &str = "attention_pref";
@@ -195,9 +195,12 @@ fn by_task<T: DeserializeOwned>(c: &Core, kind: &str, task: &str) -> Vec<T> {
 }
 
 fn acceptances_of(c: &Core, task: &str) -> Vec<AcceptanceRec> {
+    try_acceptances_of(c, task).unwrap_or_default()
+}
+
+pub(crate) fn try_acceptances_of(c: &Core, task: &str) -> anyhow::Result<Vec<AcceptanceRec>> {
     c.store
         .load_by_field(K_ACCEPT, "$.acceptance.task_id", task)
-        .unwrap_or_default()
 }
 
 /// Every recorded acceptance of a task (current and outdated), for screenshot retention

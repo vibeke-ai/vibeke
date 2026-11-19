@@ -1343,27 +1343,29 @@ fn delete_all(server: &Server, p: &Value) -> R {
             .store
             .load::<ScreenshotMeta>(KIND)
             .map_err(storage_error)?;
-        let acceptances = core
-            .store
-            .load::<crate::review::AcceptanceRec>(crate::review::K_ACCEPT)
-            .map_err(storage_error)?;
-        let mut heads = BTreeMap::<String, Vec<(String, i64)>>::new();
-        for record in acceptances {
-            let a = record.acceptance;
-            heads
-                .entry(a.task_id)
-                .or_default()
-                .push((a.head_sha, a.accepted_at_ms));
+        let mut heads = BTreeMap::<&str, Vec<(String, i64)>>::new();
+        for task in shots.iter().filter_map(|m| m.task.as_deref()) {
+            if let std::collections::btree_map::Entry::Vacant(entry) = heads.entry(task) {
+                let acceptances =
+                    crate::review::try_acceptances_of(&core, task).map_err(storage_error)?;
+                entry.insert(
+                    acceptances
+                        .into_iter()
+                        .map(|r| (r.acceptance.head_sha, r.acceptance.accepted_at_ms))
+                        .collect(),
+                );
+            }
         }
         let total = shots.len();
         let gone: Vec<_> = shots
-            .into_iter()
+            .iter()
             .filter(|m| {
                 !m.task
-                    .as_ref()
+                    .as_deref()
                     .and_then(|t| heads.get(t))
                     .is_some_and(|h| is_referenced(m, h))
             })
+            .cloned()
             .collect();
         commit_removals(server, &mut core, &gone, "deleted").map_err(|_| {
             err(
