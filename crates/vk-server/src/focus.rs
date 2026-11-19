@@ -5,6 +5,11 @@ use std::sync::{Arc, Weak, mpsc};
 use std::time::{Duration, Instant};
 use vk_proto::model::ClientFocus;
 
+pub(super) enum Message {
+    Focus(FocusWrite),
+    Flush(mpsc::Sender<()>),
+}
+
 pub(super) struct FocusWrite {
     pane: String,
     client: String,
@@ -12,16 +17,25 @@ pub(super) struct FocusWrite {
     read: Option<(String, u64)>,
     screen_rev: Option<u64>,
     changed: bool,
+    unread: bool,
+    marked_unread: bool,
     deadline: Instant,
     done: Option<mpsc::Sender<()>>,
 }
 
-pub(super) fn start(server: &Arc<Server>, jobs: mpsc::Receiver<FocusWrite>) -> std::io::Result<()> {
+pub(super) fn start(server: &Arc<Server>, jobs: mpsc::Receiver<Message>) -> std::io::Result<()> {
     let server: Weak<Server> = Arc::downgrade(server);
     std::thread::Builder::new()
         .name("focus-persistence".into())
         .spawn(move || {
-            for job in jobs {
+            for message in jobs {
+                let job = match message {
+                    Message::Focus(job) => job,
+                    Message::Flush(done) => {
+                        let _ = done.send(());
+                        continue;
+                    }
+                };
                 let Some(server) = server.upgrade() else {
                     break;
                 };
@@ -37,6 +51,13 @@ pub(super) fn start(server: &Arc<Server>, jobs: mpsc::Receiver<FocusWrite>) -> s
 }
 
 impl Server {
+    pub(crate) fn flush_focus(&self) {
+        let (tx, rx) = mpsc::channel();
+        if self.focus_writes.send(Message::Flush(tx)).is_ok() {
+            let _ = rx.recv();
+        }
+    }
+
     pub fn focus_pane(&self, client: &str, pane: &str) {
         let (tx, rx) = mpsc::channel();
         self.select_focus(client, pane, Some(tx));
@@ -57,16 +78,18 @@ impl Server {
         };
         st.last_active = Some(Instant::now());
         // Enqueue under the same lock that orders focus changes from different clients.
-        let _ = self.focus_writes.send(FocusWrite {
+        let _ = self.focus_writes.send(Message::Focus(FocusWrite {
             pane: p.id.clone(),
             client: client.to_owned(),
             tab: p.tab.clone(),
             read,
             screen_rev: self.pane_rt(pane).map(|rt| rt.rev()),
             changed,
+            unread: p.unread,
+            marked_unread: p.marked_unread,
             deadline: Instant::now() + Duration::from_secs(5),
             done,
-        });
+        }));
     }
 
     fn persist_focus(&self, job: &FocusWrite) -> bool {
@@ -83,12 +106,12 @@ impl Server {
             tx.tab(tab);
         }
         let current = self.client_focus(&job.client).pane.as_ref() == Some(&p.id);
-        if (p.unread || p.marked_unread)
+        if ((p.unread && job.unread) || (p.marked_unread && job.marked_unread))
             && (current || self.pane_rt(&p.id).map(|rt| rt.rev()) == job.screen_rev)
         {
             let mut seen = p.clone();
-            seen.unread = false;
-            seen.marked_unread = false;
+            seen.unread &= !job.unread;
+            seen.marked_unread &= !job.marked_unread;
             tx.pane(seen);
         }
         if let Some((run, rev)) = &job.read

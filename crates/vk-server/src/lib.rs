@@ -177,7 +177,7 @@ pub struct Server {
     pub render_stats: render::Stats,
     pub clients: Mutex<HashMap<String, ClientState>>,
     pub geometry_leader: Mutex<Option<String>>,
-    focus_writes: std::sync::mpsc::Sender<focus::FocusWrite>,
+    focus_writes: std::sync::mpsc::Sender<focus::Message>,
     /// Leased-port env of tasks being created (their first pane spawns before the task is in
     /// the model), by task id.
     pub pending_task_env: Mutex<HashMap<String, Vec<(String, String)>>>,

@@ -526,7 +526,7 @@ pub fn update_views(app: &mut App) {
     if want_px != app.browser.pixels {
         app.browser.pixels = want_px;
         if !cfg!(test) {
-            crate::term::sgr_pixels(want_px);
+            crate::term::sgr_pixels(want_px, &mut app.browser.out);
         }
     }
 }

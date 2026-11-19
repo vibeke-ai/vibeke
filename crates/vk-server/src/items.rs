@@ -53,6 +53,8 @@ type Cursor = (Option<String>, Option<String>);
 
 #[derive(Default)]
 pub struct State {
+    /// GC must not remove a deduplicated blob between its write and the item commit.
+    pub(crate) payloads: std::sync::RwLock<()>,
     /// run id -> its turn cursor. Validated against the store on use.
     cur: Mutex<HashMap<String, Cursor>>,
 }
@@ -217,6 +219,10 @@ pub fn turn_started(server: &Server, run: &AgentRun, summary: &str) -> Option<St
 /// adopted mid-turn). Returns the item id.
 pub fn item(server: &Server, run: &AgentRun, spec: ItemSpec) -> Option<String> {
     // The blob goes in before the core lock is taken: `put_payload` reads the model.
+    let _publishing = spec
+        .payload
+        .as_ref()
+        .map(|_| server.items.payloads.read().unwrap());
     let payload_ref = spec.payload.as_ref().and_then(|p| {
         crate::blob_store::put_payload(server, &p.data, p.ext, p.mime, Some(&run.pane)).ok()
     });

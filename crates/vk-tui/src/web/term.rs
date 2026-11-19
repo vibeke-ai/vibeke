@@ -10,5 +10,5 @@ pub fn cell_px() -> Option<(u16, u16)> {
 pub fn set_cell_px(w: u16, h: u16) {
     CELL.with(|v| v.set((w.max(1), h.max(1))));
 }
-pub fn sgr_pixels(_: bool) {}
+pub fn sgr_pixels(_: bool, _: &mut Vec<u8>) {}
 pub fn title_pushed() {}

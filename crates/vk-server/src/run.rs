@@ -246,6 +246,7 @@ pub(crate) async fn flush_for_shutdown(server: &Arc<Server>) -> Option<crate::Sn
     let flush = server.clone();
     let result = tokio::task::spawn_blocking(move || {
         // This lock fences workers still running after a timeout, before the final flush.
+        flush.flush_focus();
         flush.seal_snapshot_shutdown(permit);
         flush.shutdown_housekeeping()
     })

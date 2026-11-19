@@ -536,8 +536,9 @@ pub struct App {
     pub osc: crate::osc::State,
     /// Inbound kitty graphics of terminal panes (03 §9).
     pub images: crate::pane_images::State,
-    /// Tests only: capture clipboard writes instead of touching the host terminal/clipboard.
+    /// Host terminal controls waiting for the output writer.
     pub(crate) host_controls: Vec<u8>,
+    /// Tests only: capture clipboard writes instead of touching the host terminal/clipboard.
     pub clipboard_sink: Option<Vec<(Vec<u8>, bool)>>,
     /// How copies reach the user's clipboard (OSC 52, platform tool, iTerm2 hint).
     pub copyout: crate::copyout::Delivery,
@@ -837,7 +838,7 @@ async fn run_inner(
     let mut events = crate::input::Reader::new();
     let mut last_draw = Instant::now() - Duration::from_secs(1);
     let mut appearance_write = false;
-    loop {
+    let reason = 'ui: loop {
         if app.dirty && !output.busy {
             let wait = Duration::from_millis(1000 / 120).saturating_sub(last_draw.elapsed());
             if wait.is_zero() {
@@ -851,12 +852,12 @@ async fn run_inner(
         if let Some(r) = app.quit.take()
             && !crate::updates::prevent_quit(&mut app)
         {
-            return Ok(r);
+            break 'ui r;
         }
         // Edit-scrollback's editor: suspend the TUI (stop reading input, restore the host
         // terminal), run it in the foreground, then take the terminal back and repaint.
         if let Some(x) = app.external.take() {
-            output.finish().await?;
+            output.flush_controls(&mut app.host_controls).await?;
             appearance_write = false;
             drop(events);
             term::leave();
@@ -901,55 +902,41 @@ async fn run_inner(
             ev = events.next() => {
                 match ev {
                     Some(Ok(ev)) => app.on_input(ev),
-                    Some(Err(_)) | None => return Ok("input closed".into()),
+                    Some(Err(_)) | None => break 'ui "input closed".into(),
                 }
             }
             inc = inc_rx.recv() => {
-                let Some(inc) = inc else { return Ok("disconnected".into()) };
-                if !matches!(inc, Incoming::Frame(..)) { app.dirty = true; }
-                match inc {
-                    Incoming::Connected(i, tx, features) => {
-                        app.machines[i].tx = Some(tx);
-                        app.machines[i].features = features;
-                        app.machines[i].status = "connected".into();
-                        app.machines[i].panes.clear();
-                        app.machines[i].last_hint.clear();
-                        app.on_connected(i);
-                        app.dirty = true;
-                    }
-                    Incoming::Frame(i, f) => app.on_frame(i, f),
-                    Incoming::Upload(e) => crate::upload::on_event(&mut app, e),
-                    Incoming::Update(e) => crate::updates::on_event(&mut app, e),
-                    Incoming::Demo(line) => crate::demo::run(&mut app, &line),
-                    Incoming::Disconnected(i, why) => {
-                        app.machines[i].tx = None;
-                        app.on_disconnected(i);
-                        if why.contains("server stopped") {
-                            app.machines[i].status = "stopped".into();
-                        } else {
-                            app.machines[i].status = "offline".into();
+                let Some(first) = inc else { break 'ui "disconnected".into() };
+                // Bound each batch so input and due paints get a turn during a sustained stream.
+                let batch = std::iter::once(first).chain(std::iter::from_fn(|| inc_rx.try_recv().ok())).take(64);
+                for inc in batch {
+                    if !matches!(inc, Incoming::Frame(..)) { app.dirty = true; }
+                    match inc {
+                        Incoming::Connected(i, tx, features) => {
+                            app.machines[i].tx = Some(tx);
+                            app.machines[i].features = features;
+                            app.machines[i].status = "connected".into();
+                            app.machines[i].panes.clear();
+                            app.machines[i].last_hint.clear();
+                            app.on_connected(i);
+                            app.dirty = true;
                         }
-                        app.dirty = true;
-                        if app.machines.iter().all(|m| !m.connected()) && app.machines.len() == 1 && app.machines[0].local && app.machines[0].status == "stopped" {
-                            return Ok("server stopped".into());
-                        }
-                        spawn_connect(i, connectors[i].clone(), client_id.clone(), (!app.machines[i].local, pacers[i].clone()), inc_tx.clone(), Duration::from_millis(500));
-                    }
-                }
-                // Give keyboard events and due paints a turn during a sustained stream.
-                for _ in 0..63 {
-                    let Ok(more) = inc_rx.try_recv() else { break };
-                    if !matches!(more, Incoming::Frame(..)) { app.dirty = true; }
-                    match more {
                         Incoming::Frame(i, f) => app.on_frame(i, f),
                         Incoming::Upload(e) => crate::upload::on_event(&mut app, e),
                         Incoming::Update(e) => crate::updates::on_event(&mut app, e),
                         Incoming::Demo(line) => crate::demo::run(&mut app, &line),
-                        Incoming::Connected(i, tx, features) => { app.machines[i].tx = Some(tx); app.machines[i].features = features; app.machines[i].status = "connected".into(); app.machines[i].panes.clear(); app.machines[i].last_hint.clear(); app.on_connected(i); }
-                        Incoming::Disconnected(i, _) => {
+                        Incoming::Disconnected(i, why) => {
                             app.machines[i].tx = None;
                             app.on_disconnected(i);
-                            app.machines[i].status = "offline".into();
+                            if why.contains("server stopped") {
+                                app.machines[i].status = "stopped".into();
+                            } else {
+                                app.machines[i].status = "offline".into();
+                            }
+                            app.dirty = true;
+                            if app.machines.iter().all(|m| !m.connected()) && app.machines.len() == 1 && app.machines[0].local && app.machines[0].status == "stopped" {
+                                break 'ui "server stopped".into();
+                            }
                             spawn_connect(i, connectors[i].clone(), client_id.clone(), (!app.machines[i].local, pacers[i].clone()), inc_tx.clone(), Duration::from_millis(500));
                         }
                     }
@@ -961,7 +948,9 @@ async fn run_inner(
         // Housekeeping after every wakeup: whatever became due (by time or because of what
         // just arrived) is handled now; the next deadline is computed from the result.
         app.on_tick();
-    }
+    };
+    output.flush_controls(&mut app.host_controls).await?;
+    Ok(reason)
 }
 
 impl App {

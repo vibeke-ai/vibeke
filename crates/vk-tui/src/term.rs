@@ -56,6 +56,15 @@ impl HostWriter {
         Ok(())
     }
 
+    pub async fn flush_controls(&mut self, controls: &mut Vec<u8>) -> std::io::Result<()> {
+        self.finish().await?;
+        if !controls.is_empty() {
+            self.submit(std::mem::take(controls))?;
+            self.finish().await?;
+        }
+        Ok(())
+    }
+
     pub async fn finish(&mut self) -> std::io::Result<()> {
         if self.busy {
             let result = self.done.recv().await;
@@ -173,10 +182,8 @@ fn read_replies(env: &EnvHints) -> (ProbeResult, Vec<u8>) {
 
 /// SGR-pixels mouse reporting (DECSET 1016) on or off; enabled only while a browser pane is
 /// visible (pixel-precise clicks, 06 B3.2).
-pub fn sgr_pixels(on: bool) {
-    let mut out = std::io::stdout();
-    let _ = out.write_all(if on { b"\x1b[?1016h" } else { b"\x1b[?1016l" });
-    let _ = out.flush();
+pub fn sgr_pixels(on: bool, out: &mut Vec<u8>) {
+    out.extend_from_slice(if on { b"\x1b[?1016h" } else { b"\x1b[?1016l" });
     PIXELS.store(on, Ordering::SeqCst);
 }
 

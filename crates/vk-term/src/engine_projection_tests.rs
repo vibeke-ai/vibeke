@@ -71,6 +71,7 @@ fn row_projection_matches_legacy_across_vt_corpus() {
                 // Include reads with unfinished UTF-8, CSI, OSC and image sequences.
                 for chunk in input.as_bytes().chunks(chunk_len) {
                     feed(&mut engine, chunk);
+                    engine.take_damage();
                     assert_projection_matches_legacy(&engine);
                 }
                 // Damage consumers must not consume row-cache invalidations.

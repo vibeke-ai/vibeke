@@ -185,6 +185,7 @@ pub fn gc(
     older_than_days: i64,
     dry_run: bool,
 ) -> anyhow::Result<vk_store::blobs::GcReport> {
+    let _publishing = server.items.payloads.write().unwrap();
     let refs = vk_store::Store::payload_refs_at(&server.paths.db())?;
     Ok(store(server).gc(
         &refs,
