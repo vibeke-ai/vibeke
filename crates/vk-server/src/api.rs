@@ -383,6 +383,7 @@ pub const PANE_FORBIDDEN: &[&str] = &[
     "desk.resume",
     "desk.forget",
     "scrollback.forget",
+    "screenshot.delete_all",
     "desk.index",
     "desk.status",
     // Refused by their handlers for every pane-scoped call regardless of params; listed here
@@ -487,7 +488,6 @@ impl PaneScope {
 /// The pane scope of `method` (see [`PaneScope`]).
 pub fn pane_scope_of(method: &str) -> PaneScope {
     if PANE_FORBIDDEN.contains(&method)
-        || method == "screenshot.delete_all"
         || crate::security::PANE_FORBIDDEN.contains(&method)
         || crate::plugin_native::PANE_FORBIDDEN.contains(&method)
         || crate::privacy::PANE_FORBIDDEN.contains(&method)

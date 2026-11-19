@@ -242,9 +242,10 @@ pub fn on_removed_all(app: &mut App, mi: usize, res: Result<Value, RpcErr>) {
                 .collect();
             on_deleted(app, mi, &ids);
             let kept = value["kept"].as_u64().unwrap_or_default();
+            let removed = ids.len();
+            let noun = if removed == 1 { "image" } else { "images" };
             app.toast(format!(
-                "{label}: {} images removed, {kept} kept for accepted reviews",
-                ids.len()
+                "{label}: {removed} {noun} removed, {kept} kept for accepted reviews"
             ));
         }
         Err(e) => app.toast(format!("{label}: {}", e.message)),

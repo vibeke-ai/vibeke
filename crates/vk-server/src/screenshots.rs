@@ -28,7 +28,7 @@
 
 use crate::Server;
 use crate::api::{Ctx, R, b, err, invalid, not_found, s, u};
-use crate::core::{Tx, ulid};
+use crate::core::{Core, Tx, ulid};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -1335,13 +1335,48 @@ fn delete_all(server: &Server, p: &Value) -> R {
     if b(p, "confirm") != Some(true) {
         return Err(invalid("set confirm to true to delete all screenshots"));
     }
-    let (kept, gone): (Vec<_>, Vec<_>) = load_all(server)
-        .into_iter()
-        .partition(|m| referenced_by_acceptance(server, m));
-    remove_records_checked(server, &gone, "deleted")
-        .map_err(|_| err(ErrorKind::Internal, "could not delete screenshots"))?;
+    let (gone, kept) = {
+        // Read the records and their review references under the same lock as the deletion.
+        let mut core = server.core.lock().unwrap();
+        let storage_error = |_| err(ErrorKind::StorageUnavailable, "could not read screenshots");
+        let shots = core
+            .store
+            .load::<ScreenshotMeta>(KIND)
+            .map_err(storage_error)?;
+        let acceptances = core
+            .store
+            .load::<crate::review::AcceptanceRec>(crate::review::K_ACCEPT)
+            .map_err(storage_error)?;
+        let mut heads = BTreeMap::<String, Vec<(String, i64)>>::new();
+        for record in acceptances {
+            let a = record.acceptance;
+            heads
+                .entry(a.task_id)
+                .or_default()
+                .push((a.head_sha, a.accepted_at_ms));
+        }
+        let total = shots.len();
+        let gone: Vec<_> = shots
+            .into_iter()
+            .filter(|m| {
+                !m.task
+                    .as_ref()
+                    .and_then(|t| heads.get(t))
+                    .is_some_and(|h| is_referenced(m, h))
+            })
+            .collect();
+        commit_removals(server, &mut core, &gone, "deleted").map_err(|_| {
+            err(
+                ErrorKind::StorageUnavailable,
+                "could not delete screenshots",
+            )
+        })?;
+        let kept = total - gone.len();
+        (gone, kept)
+    };
+    remove_unused_blobs(server, &gone);
     let ids: Vec<_> = gone.iter().map(|m| &m.id).collect();
-    Ok(json!({"ids": ids, "kept": kept.len()}))
+    Ok(json!({"ids": ids, "kept": kept}))
 }
 
 // ---- retention ------------------------------------------------------------------------------
@@ -1381,29 +1416,40 @@ fn referenced_by_acceptance(server: &Server, m: &ScreenshotMeta) -> bool {
 /// Delete records (one transaction + `screenshot.deleted` event) and every blob no remaining
 /// record references. Returns the number of blobs removed.
 pub(crate) fn remove_records(server: &Server, gone: &[ScreenshotMeta], reason: &str) -> usize {
-    remove_records_checked(server, gone, reason).unwrap_or_default()
+    {
+        let mut core = server.core.lock().unwrap();
+        if commit_removals(server, &mut core, gone, reason).is_err() {
+            return 0;
+        }
+    }
+    remove_unused_blobs(server, gone)
 }
 
-fn remove_records_checked(
+fn commit_removals(
     server: &Server,
+    core: &mut Core,
     gone: &[ScreenshotMeta],
     reason: &str,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<()> {
     if gone.is_empty() {
-        return Ok(0);
+        return Ok(());
     }
-    {
-        let mut c = server.core.lock().unwrap();
-        let mut tx = Tx::new();
-        for m in gone {
-            tx.m.delete(KIND, &m.id);
-        }
-        tx.event(
-            "screenshot.deleted",
-            json!({"machine": server.opts.machine}),
-            json!({"ids": gone.iter().map(|m| &m.id).collect::<Vec<_>>(), "reason": reason}),
-        );
-        server.commit(&mut c, tx)?;
+    let mut tx = Tx::new();
+    for m in gone {
+        tx.m.delete(KIND, &m.id);
+    }
+    tx.event(
+        "screenshot.deleted",
+        json!({"machine": server.opts.machine}),
+        json!({"ids": gone.iter().map(|m| &m.id).collect::<Vec<_>>(), "reason": reason}),
+    );
+    server.commit(core, tx)?;
+    Ok(())
+}
+
+fn remove_unused_blobs(server: &Server, gone: &[ScreenshotMeta]) -> usize {
+    if gone.is_empty() {
+        return 0;
     }
     let still: HashSet<String> = load_all(server).into_iter().map(|m| m.blob).collect();
     let mut n = 0;
@@ -1418,7 +1464,7 @@ fn remove_records_checked(
         }
         let _ = std::fs::remove_file(p.with_extension("json"));
     }
-    Ok(n)
+    n
 }
 
 /// Apply the retention policy at `now_ms` (injectable for tests). `only_task` limits the run
