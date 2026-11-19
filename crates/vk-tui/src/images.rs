@@ -211,6 +211,13 @@ pub fn mark_seen(app: &mut App, mi: usize, id: &str) {
     }
 }
 
+/// Clear new-image badges across machines and close the attachment card.
+pub fn dismiss_all(app: &mut App) {
+    app.images_ui.unseen.clear();
+    crate::card::close(app);
+    app.toast("All images and screenshots marked as seen");
+}
+
 /// Unseen images, newest first.
 pub fn unseen(app: &App) -> Vec<(usize, String)> {
     app.images_ui

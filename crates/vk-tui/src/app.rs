@@ -2436,6 +2436,7 @@ impl App {
         match action {
             "help" => self.mode = Mode::Prefix(PrefixState::menu()),
             "detach" => self.quit = Some("detached".into()),
+            "dismiss_all_images" => crate::images::dismiss_all(self),
             "cancel_transfer" => crate::upload::cancel_all(self),
             "review_clipboard" => self.review_clipboard(),
             "split_vertical" | "split_horizontal" => {
