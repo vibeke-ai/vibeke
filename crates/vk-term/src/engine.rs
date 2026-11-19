@@ -1354,12 +1354,19 @@ impl Engine {
         let previous_alt = self.alt_screen();
         let unwrapped = self.passthrough.feed(bytes);
         let bytes = unwrapped.as_slice();
+        // Ghostty can extend a grapheme in place without marking its row dirty.
+        // A chunk can contain cursor moves as well as text, so its final cursor
+        // does not identify every row a combining character may have changed.
+        let mut full = !bytes.is_ascii();
         self.tracked.clear();
         self.tracker.feed(bytes, &mut self.tracked);
         for t in std::mem::take(&mut self.tracked) {
             match t {
                 Tracked::ModifyOtherKeys(l) => self.modify_other_keys = l,
-                Tracked::Reset => self.modify_other_keys = 0,
+                Tracked::Reset => {
+                    self.modify_other_keys = 0;
+                    full = true;
+                }
                 Tracked::Osc99(body) => self.cb().effects.push(osc99(&body)),
                 Tracked::SetUserVar(body) => {
                     if let Some(e) = user_var(&body) {
@@ -1376,7 +1383,13 @@ impl Engine {
         }
         self.cb().swallow_clip_reply = false;
         self.render.get_mut().stale = true;
-        let full = previous_scroll != self.scrolled_total || previous_alt != self.alt_screen();
+        full |= previous_scroll != self.scrolled_total
+            || previous_alt != self.alt_screen()
+            || self
+                .cb_ref()
+                .effects
+                .iter()
+                .any(|e| matches!(e, Effect::Mark { .. }));
         let projection = self.projection.get_mut();
         projection.awaiting_damage = true;
         projection.flat = None;

@@ -72,6 +72,14 @@ fn row_projection_matches_legacy_across_vt_corpus() {
                 for chunk in input.as_bytes().chunks(chunk_len) {
                     feed(&mut engine, chunk);
                     engine.take_damage();
+                    let projected = engine.render_rows();
+                    for (y, row) in projected.iter().enumerate() {
+                        assert_eq!(
+                            row.as_ref(),
+                            &engine.row(y as u16),
+                            "case {i}, input {chunk:?}, width {cols}, chunk size {chunk_len}, row {y}"
+                        );
+                    }
                     assert_projection_matches_legacy(&engine);
                 }
                 // Damage consumers must not consume row-cache invalidations.
