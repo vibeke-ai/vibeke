@@ -59,6 +59,17 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+// Separate probes let SQLite use both composite indexes. An OR between id and handle
+// can make it scan every entity of the kind while the server holds the state lock.
+const FIND_ENTITY: &str = "
+    SELECT json FROM entities WHERE rowid = (
+        SELECT candidate FROM (
+            SELECT rowid AS candidate, updated_at FROM entities WHERE kind=?1 AND id=?2
+            UNION ALL
+            SELECT rowid AS candidate, updated_at FROM entities WHERE kind=?1 AND handle=?2
+        ) ORDER BY updated_at DESC, candidate LIMIT 1
+    )";
+
 const MIGRATIONS: &[&str] = &[
     // 1: initial schema
     r#"
@@ -831,11 +842,7 @@ impl Store {
     pub fn find<T: DeserializeOwned>(&self, kind: &str, id_or_handle: &str) -> Result<Option<T>> {
         let j: Option<String> = self
             .conn
-            .query_row(
-                "SELECT json FROM entities WHERE kind=?1 AND (id=?2 OR handle=?2) ORDER BY updated_at DESC LIMIT 1",
-                params![kind, id_or_handle],
-                |r| r.get(0),
-            )
+            .query_row(FIND_ENTITY, params![kind, id_or_handle], |r| r.get(0))
             .optional()?;
         Ok(match j {
             Some(j) => Some(serde_json::from_str(&j)?),
@@ -1499,6 +1506,44 @@ mod tests {
         let s = Store::open(&d.path().join("s/state.db")).unwrap();
         assert_eq!(s.session_uuid, uuid);
         assert_eq!(s.last_seq().unwrap(), 3);
+    }
+
+    #[test]
+    fn find_uses_indexes_for_ids_and_handles_in_large_histories() {
+        let s = Store::open_in_memory().unwrap();
+        s.conn
+            .execute_batch(
+                "INSERT INTO entities(kind,id,handle,json,closed,updated_at) VALUES
+                ('tool_item','match',NULL,'1',0,10),
+                ('tool_item','closed','match','2',1,20),
+                ('elsewhere','match','match','3',0,30);",
+            )
+            .unwrap();
+        // A newer closed handle match wins over the older id, within the same kind.
+        assert_eq!(s.find::<u32>("tool_item", "match").unwrap(), Some(2));
+        s.conn
+            .execute(
+                "UPDATE entities SET updated_at=40 WHERE kind='tool_item' AND id='match'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(s.find::<u32>("tool_item", "match").unwrap(), Some(1));
+        assert_eq!(s.find::<u32>("tool_item", "absent").unwrap(), None);
+        // Count executed SQLite instructions instead of relying on runner timing.
+        let work = |key: &str| {
+            let mut stmt = s.conn.prepare(FIND_ENTITY).unwrap();
+            let _: Option<String> = stmt
+                .query_row(params!["tool_item", key], |row| row.get(0))
+                .optional()
+                .unwrap();
+            stmt.get_status(rusqlite::StatementStatus::VmStep)
+        };
+        let before = [work("match"), work("absent")];
+        s.conn.execute_batch(
+            "WITH RECURSIVE history(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM history WHERE n<4096)
+             INSERT INTO entities(kind,id,json,updated_at) SELECT 'tool_item','old-'||n,'0',1 FROM history;"
+        ).unwrap();
+        assert_eq!(before, [work("match"), work("absent")]);
     }
 
     #[test]

@@ -401,7 +401,7 @@ fn apply(
                 let item = format!("{run_id}:{id}");
                 let exists = server.with_core(|c| {
                     c.store
-                        .find::<vk_review::checks::ToolRecord>(K_ITEM, &item)
+                        .get::<vk_review::checks::ToolRecord>(K_ITEM, &item)
                         .ok()
                         .flatten()
                         .is_some()
@@ -437,7 +437,7 @@ fn apply(
                 let item = format!("{run_id}:{id}");
                 let rec = server.with_core(|c| {
                     c.store
-                        .find::<vk_review::checks::ToolRecord>(K_ITEM, &item)
+                        .get::<vk_review::checks::ToolRecord>(K_ITEM, &item)
                         .ok()
                         .flatten()
                 });
