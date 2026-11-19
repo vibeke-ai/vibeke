@@ -72,7 +72,7 @@ pub fn on_mouse(app: &mut App, me: &MouseEvent) {
 
 /// A key hides the hover tooltip.
 pub fn hide(app: &mut App) {
-    app.ux.tip.hover = None;
+    app.dirty |= app.ux.tip.hover.take().is_some() && app.ux.tip.shown;
 }
 
 /// Repaint once when the hover tooltip is due.

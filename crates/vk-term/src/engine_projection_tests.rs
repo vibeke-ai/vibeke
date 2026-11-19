@@ -23,6 +23,24 @@ fn assert_projection_matches_legacy(engine: &Engine) {
 }
 
 #[test]
+fn damage_accumulates_across_feeds_and_preserves_untouched_rows() {
+    let mut engine = Engine::new(40, 12, 20);
+    feed(&mut engine, b"stable");
+    engine.take_damage();
+    let before = engine.render_rows();
+    feed(&mut engine, b"\x1b[3;1Hone");
+    engine.take_damage();
+    feed(&mut engine, b"\x1b[5;1Htwo");
+    engine.take_damage();
+    let after = engine.render_rows();
+    assert!(Arc::ptr_eq(&before[8], &after[8]));
+    assert_eq!(after[2].text(), "one");
+    assert_eq!(after[4].text(), "two");
+    assert_eq!(before[2].text(), "");
+    assert_projection_matches_legacy(&engine);
+}
+
+#[test]
 fn row_projection_matches_legacy_across_vt_corpus() {
     let long_grapheme = format!("x{}", "\u{301}".repeat(24));
     let corpus = [

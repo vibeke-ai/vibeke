@@ -196,3 +196,53 @@ fn single_pane_noops_keep_zoom_and_a_stale_destination_keeps_the_source() {
     assert!(r.call("pane.move", json!({"pane": a, "to": {"tab": target["tab"]["id"]}, "anchor": target["root_pane"]["id"]})).is_err());
     assert_eq!(s.pane(&a)["tab"], before["tab"]);
 }
+
+#[test]
+fn a_key_after_switching_panes_reaches_the_pty_while_the_focus_write_waits() {
+    use super::browser_pane::Render;
+    use std::time::{Duration, Instant};
+    use vk_proto::render::{AckStatus, ClientFrame, ServerFrame};
+
+    let session = Session::new();
+    let first = session.workspace("cat");
+    let second = session.split(&first, "cat");
+    let mut render = Render::attach(&session.socket(), "focus-contention");
+    while !matches!(
+        render.rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+        ServerFrame::Model { .. }
+    ) {}
+
+    let db = rusqlite::Connection::open(session.dir.path().join("state/default/state.db")).unwrap();
+    db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    render.send(&ClientFrame::Focus {
+        pane: second.clone(),
+    });
+    render.send(&ClientFrame::Key {
+        input_id: 23,
+        pane: second.clone(),
+        key: vk_proto::input::KeyEvent::ch('x'),
+    });
+    let start = Instant::now();
+    loop {
+        // A synchronous SQLite focus write waits five seconds. Keep the lock until
+        // the holder acknowledges the PTY write, with room for a loaded runner.
+        match render
+            .rx
+            .recv_timeout(Duration::from_secs(4).saturating_sub(start.elapsed()))
+            .unwrap()
+        {
+            ServerFrame::InputAck {
+                input_id: 23,
+                status,
+            } => {
+                assert_eq!(status, AckStatus::Written);
+                break;
+            }
+            ServerFrame::Goodbye { reason } => panic!("{reason}"),
+            _ => {}
+        }
+    }
+    db.execute_batch("ROLLBACK").unwrap();
+    session.wait_output(&second, "x", 10000);
+    render.send(&ClientFrame::Detach);
+}

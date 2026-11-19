@@ -16,6 +16,56 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static KITTY_PUSHED: AtomicBool = AtomicBool::new(false);
 
+/// Only one composed frame may be in flight. While stdout is slow the UI keeps
+/// accepting input and folds further damage into the next frame.
+pub(crate) struct HostWriter {
+    tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+    done: tokio::sync::mpsc::Receiver<std::io::Result<()>>,
+    pub busy: bool,
+}
+
+impl HostWriter {
+    pub fn new() -> std::io::Result<Self> {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(1);
+        let (done_tx, done) = tokio::sync::mpsc::channel(1);
+        std::thread::Builder::new()
+            .name("terminal-output".into())
+            .spawn(move || {
+                while let Ok(bytes) = rx.recv() {
+                    let mut out = std::io::stdout().lock();
+                    let result = out.write_all(&bytes).and_then(|()| out.flush());
+                    drop(out);
+                    if done_tx.blocking_send(result).is_err() {
+                        break;
+                    }
+                }
+            })?;
+        Ok(Self {
+            tx,
+            done,
+            busy: false,
+        })
+    }
+
+    pub fn submit(&mut self, bytes: Vec<u8>) -> std::io::Result<()> {
+        debug_assert!(!self.busy);
+        self.tx
+            .try_send(bytes)
+            .map_err(|_| std::io::Error::other("terminal writer unavailable"))?;
+        self.busy = true;
+        Ok(())
+    }
+
+    pub async fn finish(&mut self) -> std::io::Result<()> {
+        if self.busy {
+            let result = self.done.recv().await;
+            self.busy = false;
+            result.ok_or_else(|| std::io::Error::other("terminal writer stopped"))??;
+        }
+        Ok(())
+    }
+}
+
 /// Total time the attach probe waits for answers (03 §6.1).
 pub const PROBE_TIMEOUT: Duration = Duration::from_millis(150);
 

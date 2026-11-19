@@ -269,7 +269,10 @@ struct Render {
 
 #[derive(Default)]
 struct RowProjection {
-    rows: Option<Arc<[Row]>>,
+    rows: Option<Arc<[Arc<Row>]>>,
+    flat: Option<Arc<[Row]>>,
+    dirty: Vec<bool>,
+    awaiting_damage: bool,
     builds: u64,
 }
 
@@ -1347,6 +1350,8 @@ impl Engine {
 
     pub fn feed(&mut self, bytes: &[u8], out: &mut Vec<Effect>) {
         // Allowed: the payload is unwrapped; off: the wrapper and payload are dropped.
+        let previous_scroll = self.scrolled_total;
+        let previous_alt = self.alt_screen();
         let unwrapped = self.passthrough.feed(bytes);
         let bytes = unwrapped.as_slice();
         self.tracked.clear();
@@ -1371,7 +1376,13 @@ impl Engine {
         }
         self.cb().swallow_clip_reply = false;
         self.render.get_mut().stale = true;
-        self.projection.get_mut().rows = None;
+        let full = previous_scroll != self.scrolled_total || previous_alt != self.alt_screen();
+        let projection = self.projection.get_mut();
+        projection.awaiting_damage = true;
+        projection.flat = None;
+        if full {
+            projection.rows = None;
+        }
         let mut last_exit = self.last_exit;
         for e in &self.cb_ref().effects {
             if let Effect::Mark { kind, exit } = e {
@@ -1442,7 +1453,10 @@ impl Engine {
         self.cb().effects.clear();
         self.update_scrolled();
         self.render.get_mut().stale = true;
-        self.projection.get_mut().rows = None;
+        let p = self.projection.get_mut();
+        p.rows = None;
+        p.flat = None;
+        p.dirty.clear();
     }
 
     pub fn title(&self) -> String {
@@ -1543,22 +1557,38 @@ impl Engine {
         self.visible_rows_shared().to_vec()
     }
 
-    /// Immutable visible rows shared by readers of the same engine state. Each feed or
-    /// resize invalidates the projection. Previously returned rows remain unchanged, so
-    /// clients can retain different revisions and still compare every row independently.
-    /// Palette defaults do not invalidate rows: their colours stay symbolic in `Style`.
+    /// Flat snapshot for consumers that need a contiguous slice of rows.
     pub fn visible_rows_shared(&self) -> Arc<[Row]> {
-        let mut projection = self.projection.borrow_mut();
-        if let Some(rows) = &projection.rows {
-            return Arc::clone(rows);
+        if let Some(flat) = &self.projection.borrow().flat {
+            return flat.clone();
         }
-        let rows: Arc<[Row]> = (0..self.rows()).map(|y| self.row(y)).collect();
-        projection.rows = Some(Arc::clone(&rows));
-        projection.builds = projection.builds.saturating_add(1);
-        rows
+        let flat: Arc<[Row]> = self.render_rows().iter().map(|r| (**r).clone()).collect();
+        self.projection.borrow_mut().flat = Some(flat.clone());
+        flat
     }
 
-    /// Number of full row projections built by this engine, for performance diagnostics.
+    /// Preserve an immutable row for each undamaged line across render revisions.
+    pub fn render_rows(&self) -> Arc<[Arc<Row>]> {
+        let mut p = self.projection.borrow_mut();
+        if p.rows.is_none() || p.awaiting_damage {
+            p.rows = Some((0..self.rows()).map(|y| Arc::new(self.row(y))).collect());
+            p.builds += 1;
+        } else if !p.dirty.is_empty() {
+            let dirty = std::mem::take(&mut p.dirty);
+            let rows = Arc::make_mut(p.rows.as_mut().unwrap());
+            for (y, changed) in dirty.into_iter().enumerate() {
+                if changed {
+                    rows[y] = Arc::new(self.row(y as u16));
+                }
+            }
+            p.builds += 1;
+        }
+        p.awaiting_damage = false;
+        p.dirty.clear();
+        p.rows.as_ref().unwrap().clone()
+    }
+
+    /// Number of row projections built by this engine, for performance diagnostics.
     /// Starts at zero on engine creation or restoration; cache hits do not increment it.
     pub fn row_projection_builds(&self) -> u64 {
         self.projection.borrow().builds
@@ -1922,6 +1952,20 @@ impl Engine {
             }
             sys::ghostty_render_state_clean(r.state);
         }
+        let count = self.rows() as usize;
+        let p = self.projection.get_mut();
+        if p.awaiting_damage {
+            if dirty == sys::GHOSTTY_RENDER_STATE_DIRTY_FULL {
+                p.rows = None;
+                p.dirty.clear();
+            } else if p.rows.is_some() && !lines.is_empty() {
+                p.dirty.resize(count, false);
+                for &y in &lines {
+                    p.dirty[y as usize] = true;
+                }
+            }
+            p.awaiting_damage = false;
+        }
         (dirty != sys::GHOSTTY_RENDER_STATE_DIRTY_FULL).then_some(lines)
     }
 
@@ -2055,7 +2099,7 @@ impl Engine {
 
     /// Plain text of the visible screen (trailing spaces trimmed per row).
     pub fn screen_text(&self) -> String {
-        self.visible_rows_shared()
+        self.render_rows()
             .iter()
             .map(|r| r.text().trim_end().to_string())
             .collect::<Vec<_>>()

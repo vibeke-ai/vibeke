@@ -386,7 +386,7 @@ async fn kitty_images_reach_the_client_once_per_hash() {
     let img = format!("\x1b[3;5H\x1b_Ga=T,i=1,f=32,s=4,v=2,c=3,r=2,q=2;{b64}\x1b\\");
     e.output(&rt, img.as_bytes());
     rt.rev_tx.send_modify(|r| *r += 1);
-    e.server.screen_dirty.notify_waiters();
+    e.server.screen_dirty.changed("P1");
     let mut images = Vec::new();
     let mut places = None;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -438,7 +438,7 @@ async fn kitty_images_reach_the_client_once_per_hash() {
     // Scroll: the placement moves up; no second Image frame.
     e.output(&rt, b"\x1b[10;1H\r\n");
     rt.rev_tx.send_modify(|r| *r += 1);
-    e.server.screen_dirty.notify_waiters();
+    e.server.screen_dirty.changed("P1");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         assert!(std::time::Instant::now() < deadline, "no moved placement");
@@ -472,7 +472,7 @@ async fn kitty_images_reach_the_client_once_per_hash() {
         .await
         .unwrap();
     tokio::io::AsyncWriteExt::flush(&mut cwr).await.unwrap();
-    e.server.screen_dirty.notify_waiters();
+    e.server.screen_dirty.changed("P1");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut resent = false;
     loop {

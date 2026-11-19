@@ -464,10 +464,10 @@ fn payloads_of_live_items_survive_gc_and_orphans_go() {
         crate::blob_store::put_payload(&s, b"orphaned output", "txt", "text/plain", Some("pa"))
             .unwrap();
     // Everything is younger than a day: nothing goes.
-    let r = crate::blob_store::gc(&s, 1, false);
+    let r = crate::blob_store::gc(&s, 1, false).unwrap();
     assert_eq!(r.removed, 0);
     // With no age limit the orphan goes and the referenced payload stays.
-    let r = crate::blob_store::gc(&s, 0, false);
+    let r = crate::blob_store::gc(&s, 0, false).unwrap();
     assert_eq!(r.removed, 1);
     assert_eq!(r.hashes, vec![orphan.clone()]);
     let bs = crate::blob_store::store(&s);
@@ -476,7 +476,7 @@ fn payloads_of_live_items_survive_gc_and_orphans_go() {
     // After the item is pruned the payload is unreferenced and collectable.
     prune(&s, now_ms() + 1000);
     assert!(payload_refs(&s).is_empty());
-    assert_eq!(crate::blob_store::gc(&s, 0, false).removed, 1);
+    assert_eq!(crate::blob_store::gc(&s, 0, false).unwrap().removed, 1);
 }
 
 #[tokio::test]

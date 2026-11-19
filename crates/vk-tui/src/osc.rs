@@ -449,6 +449,7 @@ pub fn dismiss_recovery(app: &mut App) {
     if let Some(p) = app.focused_pane() {
         let cur = app.cur;
         if let Some(e) = app.osc.recovery_seen.get_mut(&(cur, p)) {
+            app.dirty |= !e.1;
             e.1 = true;
         }
     }

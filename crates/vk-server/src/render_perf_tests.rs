@@ -64,6 +64,7 @@ fn session(server: Arc<Server>) -> Session {
         client_id: "perf-test".into(),
         views: HashMap::new(),
         visible: vec![],
+        screen_wake: Default::default(),
         focused: None,
         model_rev: 0,
         max_fps: 60,
@@ -539,4 +540,28 @@ async fn forgotten_or_closed_history_is_not_emitted_after_capture() {
             ServerFrame::History { req: 8, total: 0, lines, .. } if lines.is_empty())
         );
     }
+}
+
+#[tokio::test]
+async fn only_visible_panes_wake_a_subscriber_and_changes_coalesce() {
+    use futures::FutureExt;
+    let wakes = ScreenWakes::default();
+    let client = Arc::new(tokio::sync::Notify::new());
+    let visible = [PaneRect {
+        pane: "active".into(),
+        cols: 80,
+        rows: 24,
+    }];
+    wakes.replace(&client, &[], &visible);
+    for _ in 0..100 {
+        wakes.changed("background");
+    }
+    assert!(client.notified().now_or_never().is_none());
+    wakes.changed("active");
+    wakes.changed("active");
+    assert!(client.notified().now_or_never().is_some());
+    assert!(client.notified().now_or_never().is_none());
+    wakes.replace(&client, &visible, &[]);
+    wakes.changed("active");
+    assert!(client.notified().now_or_never().is_none());
 }

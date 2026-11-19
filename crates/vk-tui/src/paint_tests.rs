@@ -48,6 +48,7 @@ fn native_key_and_ack_do_not_spend_the_echo_paint_budget() {
         let baseline = Instant::now() - Duration::from_millis(20);
         let mut last_draw = baseline;
         app.on_input(Input::Key(KeyEvent::new(Key::Char('x'), Mods::empty())));
+        assert!(!app.dirty, "forwarding text must not schedule a paint");
         if !app.draw_frame(true).is_empty() {
             last_draw = Instant::now();
         }
@@ -57,6 +58,10 @@ fn native_key_and_ack_do_not_spend_the_echo_paint_budget() {
                 input_id: 1,
                 status: AckStatus::Written,
             },
+        );
+        assert!(
+            !app.dirty,
+            "a successful input ack must not schedule a paint"
         );
         if !app.draw_frame(true).is_empty() {
             last_draw = Instant::now();

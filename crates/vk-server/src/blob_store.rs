@@ -15,7 +15,6 @@
 use crate::Server;
 use crate::api::{Ctx, R, b, invalid};
 use serde_json::{Value, json};
-use std::collections::HashSet;
 use std::path::Path;
 use vk_proto::model::Pane;
 use vk_store::blobs::{BlobStore, MetaMode};
@@ -177,19 +176,22 @@ pub fn adopt_legacy(server: &Server) -> usize {
     n
 }
 
-/// Hashes something still points at: item payloads of the Turn/Item stream.
-pub fn referenced(server: &Server) -> HashSet<String> {
+pub fn referenced(server: &Server) -> std::collections::HashSet<String> {
     crate::items::payload_refs(server)
 }
 
-pub fn gc(server: &Server, older_than_days: i64, dry_run: bool) -> vk_store::blobs::GcReport {
-    let refs = referenced(server);
-    store(server).gc(
+pub fn gc(
+    server: &Server,
+    older_than_days: i64,
+    dry_run: bool,
+) -> anyhow::Result<vk_store::blobs::GcReport> {
+    let refs = vk_store::Store::payload_refs_at(&server.paths.db())?;
+    Ok(store(server).gc(
         &refs,
         vk_store::now_ms(),
-        older_than_days.max(0) * 86_400_000,
+        older_than_days.saturating_mul(86_400_000),
         dry_run,
-    )
+    ))
 }
 
 fn stats(server: &Server) -> R {
@@ -222,7 +224,7 @@ fn gc_api(server: &Server, p: &Value) -> R {
             .ok_or_else(|| invalid("older_than_days must be a non-negative integer"))?,
     };
     let dry = b(p, "dry_run").unwrap_or(false);
-    let r = gc(server, days, dry);
+    let r = gc(server, days, dry).map_err(crate::api::internal)?;
     Ok(json!({
         "dry_run": dry,
         "older_than_days": days,

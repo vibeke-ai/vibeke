@@ -163,7 +163,7 @@ pub(crate) fn count(log: &[Value], method: &str) -> usize {
 /// A minimal render-stream client: `render.attach`, then postcard frames.
 pub(crate) struct Render {
     w: UnixStream,
-    rx: mpsc::Receiver<ServerFrame>,
+    pub(crate) rx: mpsc::Receiver<ServerFrame>,
     next_input: u64,
 }
 
@@ -191,7 +191,7 @@ impl Render {
             next_input: 1,
         }
     }
-    fn send(&mut self, f: &ClientFrame) {
+    pub(crate) fn send(&mut self, f: &ClientFrame) {
         vk_proto::frame::write_frame(&mut self.w, f).unwrap();
         self.w.flush().unwrap();
     }

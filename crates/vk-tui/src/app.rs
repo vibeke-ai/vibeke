@@ -14,7 +14,6 @@ use anyhow::Context;
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::PathBuf;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
@@ -73,6 +72,8 @@ pub struct Machine {
     pub tx: Option<FrameSender>,
     pub model: SessionModel,
     pub focus: ClientFocus,
+    /// Ordered ping following the most recent local focus request on this connection.
+    focus_barrier: Option<(u64, Option<ClientFocus>)>,
     pub seen: HashMap<String, u64>,
     pub panes: HashMap<String, PaneBuf>,
     pub status: String,
@@ -180,6 +181,7 @@ impl Machine {
             tx: None,
             model: SessionModel::default(),
             focus: ClientFocus::default(),
+            focus_barrier: None,
             seen: HashMap::new(),
             panes: HashMap::new(),
             status: "connecting".into(),
@@ -535,6 +537,7 @@ pub struct App {
     /// Inbound kitty graphics of terminal panes (03 §9).
     pub images: crate::pane_images::State,
     /// Tests only: capture clipboard writes instead of touching the host terminal/clipboard.
+    pub(crate) host_controls: Vec<u8>,
     pub clipboard_sink: Option<Vec<(Vec<u8>, bool)>>,
     /// How copies reach the user's clipboard (OSC 52, platform tool, iTerm2 hint).
     pub copyout: crate::copyout::Delivery,
@@ -716,14 +719,17 @@ pub struct MachineSpec {
 /// Run the TUI until detach or the last machine goes away.
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn run(opts: Opts, machines: Vec<MachineSpec>) -> Result<String> {
+    let mut output = term::HostWriter::new()?;
     term::raw()?;
     let (mut probe, gcaps) = term::probe();
     // `terminal.host_overrides` (03 §6.1) before anything uses the probe.
     let _ = probe.apply_overrides(&opts.config.terminal.host_overrides);
     term::install_panic_hook();
     term::enter(probe.kitty_keyboard)?;
-    let result = run_inner(opts, machines, probe, gcaps).await;
+    let result = run_inner(opts, machines, probe, gcaps, &mut output).await;
+    let flushed = output.finish().await;
     term::leave();
+    flushed?;
     if let Ok(reason) = &result
         && let Some(message) = crate::updates::relaunch(reason)
     {
@@ -738,6 +744,7 @@ async fn run_inner(
     specs: Vec<MachineSpec>,
     probe: crate::caps::ProbeResult,
     gcaps: vk_browser::probe::GraphicsCaps,
+    output: &mut term::HostWriter,
 ) -> Result<String> {
     let client_id = format!("tui-{}-{}", std::process::id(), rand_suffix());
     let overrides = opts.config.terminal.host_overrides.clone();
@@ -829,11 +836,16 @@ async fn run_inner(
     crate::onboarding::maybe_open(&mut app);
     let mut events = crate::input::Reader::new();
     let mut last_draw = Instant::now() - Duration::from_secs(1);
+    let mut appearance_write = false;
     loop {
-        if app.dirty {
+        if app.dirty && !output.busy {
             let wait = Duration::from_millis(1000 / 120).saturating_sub(last_draw.elapsed());
-            if wait.is_zero() && app.draw()? {
-                last_draw = Instant::now();
+            if wait.is_zero() {
+                let frame = app.draw_frame(true);
+                if !frame.is_empty() {
+                    output.submit(frame)?;
+                    last_draw = Instant::now();
+                }
             }
         }
         if let Some(r) = app.quit.take()
@@ -844,6 +856,8 @@ async fn run_inner(
         // Edit-scrollback's editor: suspend the TUI (stop reading input, restore the host
         // terminal), run it in the foreground, then take the terminal back and repaint.
         if let Some(x) = app.external.take() {
+            output.finish().await?;
+            appearance_write = false;
             drop(events);
             term::leave();
             let res = crate::scrollback::run_external(&x);
@@ -857,13 +871,14 @@ async fn run_inner(
             }
         }
         // The existing reader handles query replies alongside ordinary keys and paste.
-        if crate::appearance::take_reprobe(&mut app) && events.arm_appearance_query().await {
-            let mut stdout = std::io::stdout().lock();
-            stdout.write_all(crate::appearance::QUERIES)?;
-            stdout.flush()?;
-            events.appearance_query_sent();
+        if !output.busy
+            && crate::appearance::take_reprobe(&mut app)
+            && events.arm_appearance_query().await
+        {
+            output.submit(crate::appearance::QUERIES.to_vec())?;
+            appearance_write = true;
         }
-        let redraw_in = if app.dirty {
+        let redraw_in = if app.dirty && !output.busy {
             Duration::from_millis(1000 / 120).saturating_sub(last_draw.elapsed())
         } else {
             Duration::from_secs(3600)
@@ -879,6 +894,10 @@ async fn run_inner(
             }
         };
         tokio::select! {
+            result = output.finish(), if output.busy => {
+                result?;
+                if std::mem::take(&mut appearance_write) { events.appearance_query_sent(); }
+            }
             ev = events.next() => {
                 match ev {
                     Some(Ok(ev)) => app.on_input(ev),
@@ -887,6 +906,7 @@ async fn run_inner(
             }
             inc = inc_rx.recv() => {
                 let Some(inc) = inc else { return Ok("disconnected".into()) };
+                if !matches!(inc, Incoming::Frame(..)) { app.dirty = true; }
                 match inc {
                     Incoming::Connected(i, tx, features) => {
                         app.machines[i].tx = Some(tx);
@@ -916,7 +936,10 @@ async fn run_inner(
                         spawn_connect(i, connectors[i].clone(), client_id.clone(), (!app.machines[i].local, pacers[i].clone()), inc_tx.clone(), Duration::from_millis(500));
                     }
                 }
-                while let Ok(more) = inc_rx.try_recv() {
+                // Give keyboard events and due paints a turn during a sustained stream.
+                for _ in 0..63 {
+                    let Ok(more) = inc_rx.try_recv() else { break };
+                    if !matches!(more, Incoming::Frame(..)) { app.dirty = true; }
                     match more {
                         Incoming::Frame(i, f) => app.on_frame(i, f),
                         Incoming::Upload(e) => crate::upload::on_event(&mut app, e),
@@ -931,7 +954,6 @@ async fn run_inner(
                         }
                     }
                 }
-                app.dirty = true;
             }
             _ = timer => app.on_deadline(Instant::now()),
             _ = tokio::time::sleep(redraw_in) => {}
@@ -985,6 +1007,7 @@ impl App {
             clip: Default::default(),
             osc: crate::osc::State::from_env(),
             images: Default::default(),
+            host_controls: Vec::new(),
             clipboard_sink: None,
             copyout: crate::copyout::Delivery::from_env(),
             last_copy: None,
@@ -1247,6 +1270,7 @@ impl App {
     }
 
     pub(crate) fn on_connected(&mut self, i: usize) {
+        self.machines[i].focus_barrier = None;
         crate::browser::on_connected(self, i);
         crate::inbox::on_connected(self, i);
         if !self.machines[i].capabilities().host {
@@ -1276,6 +1300,7 @@ impl App {
         self.pending_ops.connection_lost(&label);
         // Responses to requests on the old connection will never arrive.
         self.machines[i].pending.clear();
+        self.machines[i].focus_barrier = None;
         self.inbox.outstanding.remove(&i);
         crate::tasks::on_disconnect(self, i);
         crate::remote_view::on_disconnected(self, i);
@@ -1337,6 +1362,7 @@ impl App {
         // The first key press the pane receives closes the attach pop-up (spec 18 §6.1).
         crate::card::on_key_to_pane(self, &ev);
         if crate::browser::focused_browser(self).is_some() {
+            self.dirty = true;
             crate::browser::send_key(self, ev);
             return;
         }
@@ -1375,14 +1401,26 @@ impl App {
                 pane: Some(p.clone()),
             };
         }
-        self.machines[machine].send(ClientFrame::Focus { pane: p });
+        self.ux.hover.hover = None;
+        let nonce = self.input_id() | (1 << 63);
+        let m = &mut self.machines[machine];
+        if m.send(ClientFrame::Focus { pane: p }) && m.send(ClientFrame::Ping { nonce }) {
+            m.focus_barrier = Some((nonce, None));
+        }
         self.dirty = true;
     }
 
     // ---- server frames ------------------------------------------------------------------
 
     pub(crate) fn on_frame(&mut self, i: usize, f: ServerFrame) {
-        self.dirty = true;
+        self.dirty |= !matches!(
+            f,
+            ServerFrame::Pong { .. }
+                | ServerFrame::InputAck {
+                    status: AckStatus::Written,
+                    ..
+                }
+        );
         match f {
             ServerFrame::Hello { machine, .. } => {
                 if self.machines[i].local && self.machines[i].label.is_empty() {
@@ -1395,7 +1433,11 @@ impl App {
                 m.model = *model;
                 m.seen = seen.into_iter().collect();
                 // The server owns per-client focus; adopt it unless we're mid-switch.
-                m.focus = focus;
+                if let Some((_, latest)) = &mut m.focus_barrier {
+                    *latest = Some(focus);
+                } else {
+                    m.focus = focus;
+                }
                 if m.focus.pane.is_none()
                     && let Some(t) = m.model.tabs.first()
                 {
@@ -1557,7 +1599,7 @@ impl App {
             } => crate::notifications::on_notify(self, i, title, body, pane, delivered),
             ServerFrame::Bell { pane } => {
                 if Some(&pane) != self.focused_pane().as_ref() {
-                    let _ = std::io::stdout().write_all(b"\x07");
+                    self.host_controls.push(7);
                 }
             }
             ServerFrame::Clipboard {
@@ -1576,7 +1618,20 @@ impl App {
                 }
             }
             ServerFrame::CommandResult { req, json } => self.on_command_result(i, req, &json),
-            ServerFrame::Pong { .. } => {}
+            ServerFrame::Pong { nonce, .. } => {
+                let m = &mut self.machines[i];
+                if m.focus_barrier.as_ref().is_some_and(|(n, _)| *n == nonce)
+                    && let Some((_, Some(fallback))) = m.focus_barrier.take()
+                    && !m
+                        .model
+                        .panes
+                        .iter()
+                        .any(|p| Some(&p.id) == m.focus.pane.as_ref())
+                {
+                    m.focus = fallback;
+                    self.dirty = true;
+                }
+            }
             ServerFrame::Media(m) => crate::browser::on_media(self, i, *m),
             ServerFrame::BrowserState { pane, state } => {
                 crate::browser::on_state(self, i, pane, state)
@@ -1814,9 +1869,13 @@ impl App {
             let max = self.config.clipboard.remote_write_max_bytes.0;
             let plan = crate::copyout::plan(data, primary, &self.copyout.env, max);
             let cmd = self.copyout.native_cmd.clone();
-            crate::copyout::deliver(data, primary, &plan, &mut std::io::stdout(), &mut |d, p| {
-                crate::copyout::native_copy(cmd.as_deref(), d, p)
-            })
+            crate::copyout::deliver(
+                data,
+                primary,
+                &plan,
+                &mut self.host_controls,
+                &mut |d, p| crate::copyout::native_copy(cmd.as_deref(), d, p),
+            )
         };
         if primary {
             return;
@@ -1976,7 +2035,6 @@ impl App {
             crate::input::Input::Appearance(det) => crate::appearance::on_detect(self, Some(det)),
             crate::input::Input::AppearanceComplete => {}
             crate::input::Input::Key(k) => {
-                self.dirty = true;
                 crate::gateway::on_input(self);
                 let k = self.keymap.altgr(k);
                 self.on_key(k);
@@ -1985,7 +2043,7 @@ impl App {
     }
 
     pub(crate) fn on_event(&mut self, ev: Event) {
-        self.dirty = true;
+        self.dirty |= !matches!(ev, Event::Key(_));
         if matches!(ev, Event::Key(_) | Event::Mouse(_) | Event::Paste(_)) {
             crate::gateway::on_input(self);
         }
@@ -2030,6 +2088,7 @@ impl App {
             return;
         }
         if crate::pane_controls::repeat_key(self, &ev) {
+            self.dirty = true;
             return;
         }
         // Raw mode makes ctrl+c an input key rather than a signal. With no pane to
@@ -2053,6 +2112,7 @@ impl App {
             self.action("detach", None);
             return;
         }
+        self.dirty |= !matches!(self.mode, Mode::Normal);
         let mode = std::mem::replace(&mut self.mode, Mode::Normal);
         let from_card = matches!(
             mode,
@@ -2080,11 +2140,13 @@ impl App {
                     return;
                 }
                 if self.keymap.is_prefix(&ev) {
+                    self.dirty = true;
                     self.mode = Mode::Prefix(PrefixState::armed(&self.keymap));
                     return;
                 }
                 // A plugin popup is modal: its terminal gets every key (08 §5).
                 if crate::plugins::normal_key(self, &ev) {
+                    self.dirty = true;
                     return;
                 }
                 // Direct bindings never steal keys from a focused browser page.
@@ -2092,6 +2154,7 @@ impl App {
                     && crate::browser::focused_browser(self).is_none()
                     && crate::ux::binding_active(self, &b.action)
                 {
+                    self.dirty = true;
                     if b.action == "remote_image_paste" && !self.m().local {
                         crate::upload::image_paste(self);
                         return;
@@ -3188,18 +3251,6 @@ impl App {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    fn draw(&mut self) -> Result<bool> {
-        let out = self.draw_frame(true);
-        if out.is_empty() {
-            return Ok(false);
-        }
-        let mut stdout = std::io::stdout();
-        stdout.write_all(&out)?;
-        stdout.flush()?;
-        Ok(true)
-    }
-
     /// Compose one frame without choosing the host output device.
     #[cfg(any(target_arch = "wasm32", test))]
     pub(crate) fn draw_bytes(&mut self) -> Vec<u8> {
@@ -3234,6 +3285,7 @@ impl App {
         // Browser tile images first; their placeholder cells follow in the grid diff.
         let mut out = crate::browser::take_output(self);
         out.extend(crate::pane_images::take_output(self));
+        out.append(&mut self.host_controls);
         if let Some(title) = crate::nav::title_update(self) {
             out.extend_from_slice(&title);
         }

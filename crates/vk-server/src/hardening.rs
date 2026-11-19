@@ -139,9 +139,13 @@ pub fn sweep_with(server: &Server, cfg: &EventsConfig) -> SweepReport {
     r.stream_removed = crate::items::prune(server, cutoff);
     r.tracking_removed = crate::tracking::prune(server, cutoff);
     r.collisions_removed = crate::collision::prune(server, cutoff);
-    let g = crate::blob_store::gc(server, cfg.blob_days, false);
-    r.blobs_removed = g.removed;
-    r.blob_bytes = g.bytes;
+    match crate::blob_store::gc(server, cfg.blob_days, false) {
+        Ok(g) => {
+            r.blobs_removed = g.removed;
+            r.blob_bytes = g.bytes;
+        }
+        Err(e) => tracing::warn!(error = %e, "blob retention sweep failed"),
+    }
     // Give the pages the deletes freed back to the file system, one step per core-lock hold,
     // then empty the WAL.
     loop {

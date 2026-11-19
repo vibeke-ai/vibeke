@@ -18,7 +18,7 @@ const MAX_UNACKED: u32 = 2;
 struct PaneView {
     epoch: u32,
     rev: u64,
-    rows: Arc<[Row]>,
+    rows: Arc<[Arc<Row>]>,
     cursor: Cursor,
     modes: PaneModes,
     title: String,
@@ -74,11 +74,47 @@ impl Stats {
     }
 }
 
+/// Each attached render stream has one coalescing wakeup for all of its visible panes.
+#[derive(Default)]
+pub struct ScreenWakes(
+    std::sync::Mutex<HashMap<String, Vec<std::sync::Weak<tokio::sync::Notify>>>>,
+);
+
+impl ScreenWakes {
+    fn replace(&self, wake: &Arc<tokio::sync::Notify>, old: &[PaneRect], new: &[PaneRect]) {
+        let mut panes = self.0.lock().unwrap();
+        let subscriber = Arc::downgrade(wake);
+        for view in old {
+            if let Some(clients) = panes.get_mut(&view.pane) {
+                clients.retain(|c| !c.ptr_eq(&subscriber));
+                if clients.is_empty() {
+                    panes.remove(&view.pane);
+                }
+            }
+        }
+        for view in new {
+            let clients = panes.entry(view.pane.clone()).or_default();
+            if !clients.iter().any(|c| c.ptr_eq(&subscriber)) {
+                clients.push(subscriber.clone());
+            }
+        }
+    }
+
+    pub fn changed(&self, pane: &str) {
+        if let Some(clients) = self.0.lock().unwrap().get(pane) {
+            for client in clients.iter().filter_map(|w| w.upgrade()) {
+                client.notify_one();
+            }
+        }
+    }
+}
+
 pub struct Session {
     server: Arc<Server>,
     client_id: String,
     views: HashMap<String, PaneView>,
     visible: Vec<PaneRect>,
+    screen_wake: Arc<tokio::sync::Notify>,
     focused: Option<String>,
     model_rev: u64,
     max_fps: u32,
@@ -347,6 +383,7 @@ where
         client_id: client_id.clone(),
         views: HashMap::new(),
         visible: Vec::new(),
+        screen_wake: Default::default(),
         focused: None,
         model_rev: 0,
         max_fps: max_fps.max(1),
@@ -372,6 +409,7 @@ where
     asyncio::write_frame(&mut wr, &hello).await?;
     let mut model_rx = server.model_rev.subscribe();
     let mut ui_rx = server.ui.subscribe();
+    let screen_wake = s.screen_wake.clone();
     let media_wake = s.media.notify.clone();
     let result: Result<()> = async {
         s.auth_ok().map_err(anyhow::Error::msg)?;
@@ -403,7 +441,7 @@ where
                     }
                 }
                 _ = model_rx.changed() => {}
-                _ = server.screen_dirty.notified() => {}
+                _ = screen_wake.notified() => {}
                 _ = media_wake.notified() => {}
                 ev = ui_rx.recv() => {
                     if let Ok(ev) = ev && !s.on_ui(ev, &mut wr).await? { break }
@@ -475,6 +513,7 @@ where
     .await;
     reader.abort();
     s.reads.abort_all();
+    server.screen_dirty.replace(&screen_wake, &s.visible, &[]);
     s.media.close(&server);
     // Remember focus for the next attach.
     let focus = server.client_focus(&client_id);
@@ -675,7 +714,7 @@ impl Session {
                 st.focus = focus;
             }
         } else {
-            self.server.focus_pane(&self.client_id, pane);
+            self.server.select_focus(&self.client_id, pane, None);
         }
     }
 
@@ -892,6 +931,9 @@ impl Session {
                     st.visible = panes.iter().map(|p| p.pane.clone()).collect();
                     st.host_focused = active;
                 }
+                self.server
+                    .screen_dirty
+                    .replace(&self.screen_wake, &self.visible, &panes);
                 self.visible = panes;
                 self.views
                     .retain(|k, _| self.visible.iter().any(|v| &v.pane == k));
@@ -1097,7 +1139,7 @@ impl Session {
                     })
                     .collect();
                 let builds = sc.engine.row_projection_builds();
-                let rows = sc.engine.visible_rows_shared();
+                let rows = sc.engine.render_rows();
                 self.server.render_stats.projections.fetch_add(
                     sc.engine.row_projection_builds() - builds,
                     std::sync::atomic::Ordering::Relaxed,
@@ -1155,12 +1197,12 @@ impl Session {
                             ops.push(DiffOp::ScrollUp { n: n as u16 });
                             let base = base.to_mut();
                             base.drain(..n);
-                            base.extend(std::iter::repeat_n(Row::default(), n));
+                            base.extend(std::iter::repeat_n(Arc::new(Row::default()), n));
                         }
                     }
                     let upd: Vec<(u16, Row)> = (0..rows.len())
                         .filter(|&i| rows[i] != base[i])
-                        .map(|i| (i as u16, rows[i].clone()))
+                        .map(|i| (i as u16, (*rows[i]).clone()))
                         .collect();
                     if !upd.is_empty() {
                         ops.push(DiffOp::Rows(upd));
@@ -1196,7 +1238,7 @@ impl Session {
                         rev: 1,
                         cols,
                         rows: nrows,
-                        lines: rows.to_vec(),
+                        lines: rows.iter().map(|r| (**r).clone()).collect(),
                         cursor,
                         modes,
                         title: title.clone(),

@@ -23,6 +23,7 @@ pub mod config_api;
 pub mod core;
 pub mod desk;
 pub mod drafts;
+mod focus;
 pub mod fs_api;
 pub mod gateway_api;
 pub mod gateway_bridge;
@@ -172,10 +173,11 @@ pub struct Server {
     pub model_rev: watch::Sender<u64>,
     pub events: broadcast::Sender<Arc<Event>>,
     pub ui: broadcast::Sender<UiEvent>,
-    pub screen_dirty: Notify,
+    pub screen_dirty: render::ScreenWakes,
     pub render_stats: render::Stats,
     pub clients: Mutex<HashMap<String, ClientState>>,
     pub geometry_leader: Mutex<Option<String>>,
+    focus_writes: std::sync::mpsc::Sender<focus::FocusWrite>,
     /// Leased-port env of tasks being created (their first pane spawns before the task is in
     /// the model), by task id.
     pub pending_task_env: Mutex<HashMap<String, Vec<(String, String)>>>,
@@ -374,7 +376,9 @@ impl Server {
         let (ui, _) = broadcast::channel(256);
         let archive = Archive::new(&paths.scrollback());
         let archive_read_fence = archive.read_fence();
+        let (focus_writes, focus_rx) = std::sync::mpsc::channel();
         let server = Arc::new(Server {
+            focus_writes,
             archive: Mutex::new(archive),
             archive_read_fence,
             paths,
@@ -384,7 +388,7 @@ impl Server {
             model_rev,
             events,
             ui,
-            screen_dirty: Notify::new(),
+            screen_dirty: Default::default(),
             render_stats: render::Stats::default(),
             clients: Mutex::new(HashMap::new()),
             geometry_leader: Mutex::new(None),
@@ -434,6 +438,7 @@ impl Server {
         });
         // Unlock the state key before anything is archived (09 §9.1).
         privacy::init(&server);
+        focus::start(&server, focus_rx)?;
         Ok(server)
     }
 
@@ -443,6 +448,12 @@ impl Server {
 
     /// Commit a transaction, publish its events and bump the model revision.
     pub fn commit(&self, core: &mut Core, tx: Tx) -> Result<Vec<Event>> {
+        // Drafts and transcript history have their own events and are absent from SessionModel.
+        let publish_model = core.model.degraded.is_some()
+            || !tx
+                .m
+                .only_entities(&["draft", "stream_item", "stream_turn"], "op_receipt");
+        let focus_write = tx.focus_deadline.is_some();
         match core.commit(tx) {
             Ok(events) => {
                 if let Some(msg) = core.ephemeral_hit.take() {
@@ -458,9 +469,12 @@ impl Server {
                 for e in &events {
                     let _ = self.events.send(Arc::new(e.clone()));
                 }
-                self.bump_model();
+                if publish_model {
+                    self.bump_model();
+                }
                 Ok(events)
             }
+            Err(e) if focus_write && vk_store::Store::is_busy(&e) => Err(e),
             Err(e) => {
                 self.enter_degraded(core, format!("storage unavailable: {e:#}"));
                 Err(e)
@@ -1534,54 +1548,6 @@ impl Server {
     }
 
     // ---- focus ----------------------------------------------------------------------------
-
-    pub fn focus_pane(&self, client: &str, pane_id: &str) {
-        let Some((p, ws)) =
-            self.with_core(|c| c.pane(pane_id).cloned().map(|p| (p.clone(), p.workspace)))
-        else {
-            return;
-        };
-        let prev = {
-            let mut clients = self.clients.lock().unwrap();
-            let st = clients.entry(client.to_string()).or_default();
-            let prev = st.focus.pane.clone();
-            st.focus = ClientFocus {
-                workspace: Some(ws),
-                tab: Some(p.tab.clone()),
-                pane: Some(p.id.clone()),
-            };
-            st.last_active = Some(Instant::now());
-            prev
-        };
-        let mut c = self.core.lock().unwrap();
-        let mut tx = Tx::new();
-        if let Some(mut tab) = c.tab(&p.tab).cloned()
-            && tab.focused_pane.as_deref() != Some(&p.id)
-        {
-            tab.focused_pane = Some(p.id.clone());
-            tx.tab(tab);
-        }
-        let mut np = p.clone();
-        if np.unread || np.marked_unread {
-            np.unread = false;
-            np.marked_unread = false;
-            tx.pane(np);
-        }
-        // Mark seen (done → idle) for the focused pane's run (08 §2.3).
-        if let Some(r) = c.run_for_pane(&p.id) {
-            tx.m.read_mark("local", &p.id, r.done_rev);
-        }
-        tx.event("pane.focused", subject_pane(&p), json!({"client": client}));
-        // Focus and unread marks are UI convenience: applied in memory when storage is down.
-        tx.ephemeral = true;
-        let _ = self.commit(&mut c, tx);
-        drop(c);
-        self.refresh_auto_name(&p.id);
-        if prev.as_deref() != Some(&p.id) {
-            self.agents.on_focus(self, &p.id);
-        }
-        self.bump_model();
-    }
 
     /// Record a pane's current cwd ([`Self::pane_cwd`]) in the model, and re-derive its
     /// workspace's automatic name when it moved. Shells without OSC 7 report a `cd` nowhere

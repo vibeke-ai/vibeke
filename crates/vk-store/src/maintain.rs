@@ -136,6 +136,23 @@ impl Store {
         Ok(busy == 0)
     }
 
+    /// Read the live payload reference index on its own WAL snapshot. The render and
+    /// input paths can use the session writer while garbage collection walks this index.
+    pub fn payload_refs_at(path: &std::path::Path) -> Result<std::collections::HashSet<String>> {
+        let conn = rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let mut st = conn.prepare(
+            "SELECT DISTINCT json_extract(json, '$.payload_ref')
+            FROM entities INDEXED BY stream_item_payload_refs
+            WHERE kind='stream_item' AND closed=0 AND json_type(json, '$.payload_ref')='text'",
+        )?;
+        Ok(st
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Distinct text values at JSON `path` among the entities of `kind` (only the open ones when
     /// `open_only`). Reads only that field, so a caller that needs one field does not decode
     /// every document.

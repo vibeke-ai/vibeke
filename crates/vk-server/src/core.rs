@@ -56,6 +56,8 @@ pub struct Tx {
     /// memory only, flagged ephemeral and lost on restart (02 §4a). Never set for anything a
     /// restart or another client must see (interactions, tasks, layout).
     pub ephemeral: bool,
+    /// Focus persistence may retry busy writes off the core lock until this deadline.
+    pub focus_deadline: Option<std::time::Instant>,
 }
 
 impl Tx {
@@ -213,9 +215,23 @@ impl Core {
                 Some(serde_json::to_string(&self.counters)?),
             );
         }
-        let events = match self.store.commit(std::mem::take(&mut tx.m)) {
+        let m = std::mem::take(&mut tx.m);
+        let write = if tx.focus_deadline.is_some() {
+            self.store.commit_nowait(m)
+        } else {
+            self.store.commit(m)
+        };
+        let events = match write {
             Ok(e) => e,
             // Pure UI convenience while storage is down: keep it in memory, emit no event.
+            Err(e)
+                if tx
+                    .focus_deadline
+                    .is_some_and(|d| std::time::Instant::now() < d)
+                    && Store::is_busy(&e) =>
+            {
+                return Err(e);
+            }
             Err(e) if tx.ephemeral => {
                 self.ephemeral_hit = Some(format!("storage unavailable: {e:#}"));
                 Vec::new()

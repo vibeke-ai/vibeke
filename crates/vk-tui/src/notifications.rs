@@ -7,7 +7,6 @@ use crate::app::{App, Toast};
 use crate::time::{Duration, Instant};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::io::Write;
 
 #[derive(Default)]
 pub struct State {
@@ -116,7 +115,7 @@ pub fn on_notify(
         if cfg!(test) {
             app.parity.notes.osc_sink.push(osc);
         } else {
-            let _ = std::io::stdout().write_all(osc.as_bytes());
+            app.host_controls.extend_from_slice(osc.as_bytes());
         }
     }
 }

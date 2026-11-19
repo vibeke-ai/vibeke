@@ -795,7 +795,7 @@ impl PaneLoop {
                     let rev = sc.rev;
                     drop(sc);
                     self.rt.rev_tx.send_replace(rev);
-                    self.server.screen_dirty.notify_waiters();
+                    self.server.screen_dirty.changed(&self.rt.id);
                     self.server.pane_resized(&self.rt.id, cols, rows);
                     self.snapshot_dirty = true;
                     self.arm_snapshot();
@@ -816,7 +816,7 @@ impl PaneLoop {
                 self.replaying = true;
                 self.snapshot_dirty = true;
                 self.rt.rev_tx.send_replace(rev);
-                self.server.screen_dirty.notify_waiters();
+                self.server.screen_dirty.changed(&self.rt.id);
                 self.method = "lost".into();
             }
             FromHolder::ReplayDone { queued_queries, .. } => {
@@ -856,7 +856,7 @@ impl PaneLoop {
                     }
                     let rev = self.rt.screen.lock().unwrap().rev;
                     self.rt.rev_tx.send_replace(rev);
-                    self.server.screen_dirty.notify_waiters();
+                    self.server.screen_dirty.changed(&self.rt.id);
                 }
                 let _ = self.send(&ToHolder::StatusQuery).await;
                 if self.snapshot_again {
@@ -959,7 +959,7 @@ impl PaneLoop {
                     self.server.mark_recovered(&self.rt.id, Some(&self.method));
                     let rev = self.rt.screen.lock().unwrap().rev;
                     self.rt.rev_tx.send_replace(rev);
-                    self.server.screen_dirty.notify_waiters();
+                    self.server.screen_dirty.changed(&self.rt.id);
                 }
                 let _ = self.send(&ToHolder::StatusQuery).await;
                 Ok(Some(None))
@@ -1033,7 +1033,7 @@ impl PaneLoop {
         }
         if !self.replaying {
             self.rt.rev_tx.send_replace(rev);
-            self.server.screen_dirty.notify_waiters();
+            self.server.screen_dirty.changed(&self.rt.id);
             self.server.pane_output(&self.rt.id);
         }
     }
@@ -1106,7 +1106,7 @@ impl PaneLoop {
                 .previews
                 .on_output(&self.rt.id, &bytes[skip.min(bytes.len())..]);
             self.rt.rev_tx.send_replace(rev);
-            self.server.screen_dirty.notify_waiters();
+            self.server.screen_dirty.changed(&self.rt.id);
             self.server.pane_output(&self.rt.id);
             self.server.agents.on_screen(&self.server, &self.rt.id);
         }
@@ -1178,7 +1178,7 @@ impl PaneLoop {
                     let rev = sc.rev;
                     drop(sc);
                     self.rt.rev_tx.send_replace(rev);
-                    self.server.screen_dirty.notify_waiters();
+                    self.server.screen_dirty.changed(&self.rt.id);
                     self.server.pane_resized(&self.rt.id, cols, rows);
                 }
                 Ok(None)

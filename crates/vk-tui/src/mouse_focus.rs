@@ -29,6 +29,7 @@ pub fn on_mouse(app: &mut App, me: &MouseEvent) {
         return;
     }
     if !matches!(me.kind, MouseEventKind::Moved) {
+        app.ux.hover.hover = None;
         return;
     }
     let under = app
@@ -82,6 +83,60 @@ mod tests {
             row,
             modifiers: KeyModifiers::NONE,
         });
+    }
+
+    #[test]
+    fn stale_model_after_click_cannot_redirect_the_next_key() {
+        use vk_proto::render::{ClientFrame, ServerFrame};
+        let (mut app, mut rx) = fleet();
+        let model = Box::new(app.m().model.clone());
+        let old = app.m().focus.clone();
+        let (_, rect) = app
+            .pane_rects()
+            .into_iter()
+            .find(|(p, _)| p == "p2")
+            .unwrap();
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(crate::event::MouseButton::Left),
+            column: rect.x + 1,
+            row: rect.y + 1,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.focused_pane().as_deref(), Some("p2"));
+        let nonce = std::iter::from_fn(|| rx[0].try_recv().ok())
+            .find_map(|f| match f {
+                ClientFrame::Ping { nonce } => Some(nonce),
+                _ => None,
+            })
+            .unwrap();
+        let stale = || ServerFrame::Model {
+            model: model.clone(),
+            focus: old.clone(),
+            seen: vec![],
+        };
+        app.on_frame(0, stale());
+        app.on_frame(
+            0,
+            ServerFrame::Pong {
+                nonce: nonce - 1,
+                server_ts_ms: 0,
+            },
+        );
+        app.on_frame(0, stale());
+        app.on_key(vk_proto::input::KeyEvent::ch('x'));
+        assert!(
+            std::iter::from_fn(|| rx[0].try_recv().ok())
+                .any(|f| matches!(f, ClientFrame::Key { pane, .. } if pane == "p2"))
+        );
+        app.on_frame(
+            0,
+            ServerFrame::Pong {
+                nonce,
+                server_ts_ms: 0,
+            },
+        );
+        app.on_frame(0, stale()); // A subsequent authoritative focus change is accepted.
+        assert_eq!(app.focused_pane().as_deref(), Some("p1"));
     }
 
     #[test]

@@ -131,6 +131,9 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX IF NOT EXISTS entities_closed ON entities(kind, closed, updated_at, id);
     CREATE INDEX IF NOT EXISTS events_tier_seq ON events(tier, seq);
     "#,
+    // Open stream items with a blob reference are a small subset of agent history.
+    r#"CREATE INDEX stream_item_payload_refs ON entities(json_extract(json, '$.payload_ref'))
+       WHERE kind='stream_item' AND closed=0 AND json_type(json, '$.payload_ref')='text';"#,
 ];
 
 /// JSON paths with an expression index on `entities` (migrations 3 and 7). [`Store::load_by_field`]
@@ -320,6 +323,21 @@ impl Mutation {
     pub fn is_empty(&self) -> bool {
         self.writes.is_empty() && self.events.is_empty()
     }
+    /// True when the entire write set concerns these entities (plus optional receipts).
+    pub fn only_entities(&self, kinds: &[&str], receipt: &str) -> bool {
+        let mut matched = false;
+        for w in &self.writes {
+            match w {
+                Write::Put { kind, .. } | Write::Delete { kind, .. } if kinds.contains(kind) => {
+                    matched = true
+                }
+                Write::Put { kind, .. } if *kind == receipt => {}
+                _ => return false,
+            }
+        }
+        matched
+    }
+
     pub fn put<T: Serialize>(
         &mut self,
         kind: &'static str,
@@ -638,6 +656,26 @@ impl Store {
             params![key, value],
         )?;
         Ok(())
+    }
+
+    /// A focus worker retries a contended write after releasing the state mutex.
+    pub fn commit_nowait(&mut self, m: Mutation) -> Result<Vec<Event>> {
+        self.conn.busy_timeout(std::time::Duration::ZERO)?;
+        let result = self.commit(m);
+        self.conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        result
+    }
+
+    pub fn is_busy(error: &anyhow::Error) -> bool {
+        error
+            .downcast_ref::<rusqlite::Error>()
+            .and_then(|e| e.sqlite_error_code())
+            .is_some_and(|code| {
+                matches!(
+                    code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                )
+            })
     }
 
     /// Commit writes and events in one transaction. Returns the committed events (with seq).

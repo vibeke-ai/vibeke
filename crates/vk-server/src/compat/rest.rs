@@ -49,7 +49,7 @@ fn clear_screen(server: &Server, rt: &crate::pane::PaneRt) {
         sc.rev
     };
     rt.rev_tx.send_replace(rev);
-    server.screen_dirty.notify_waiters();
+    server.screen_dirty.changed(&rt.id);
 }
 
 /// A `PaneTextPoint` (`{row, col}`; `row` counts from the oldest scrollback row kept).

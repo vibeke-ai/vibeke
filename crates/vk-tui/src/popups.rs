@@ -191,8 +191,7 @@ pub fn key(app: &mut App, ev: KeyEvent, p: Popup) {
             _ if esc => {}
             Key::Named(NamedKey::Enter) => {
                 let mi = app.cur;
-                app.return_to.clear();
-                app.machines[mi].send(vk_proto::render::ClientFrame::Focus { pane });
+                app.focus_pane(mi, &pane);
             }
             // Track this work, or open the tracked task's details.
             Key::Char('t') => {
@@ -293,11 +292,7 @@ pub fn key(app: &mut App, ev: KeyEvent, p: Popup) {
                     }
                 }
                 (_, Key::Char('o')) => {
-                    app.cur = mi;
-                    app.return_to.clear();
-                    app.machines[mi].send(vk_proto::render::ClientFrame::Focus {
-                        pane: it.pane.clone(),
-                    });
+                    app.focus_pane(mi, &it.pane);
                 }
                 (InteractionKind::Approval | InteractionKind::PlanReview, Key::Char('y'))
                     if open =>

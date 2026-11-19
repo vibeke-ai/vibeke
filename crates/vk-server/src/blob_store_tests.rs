@@ -28,6 +28,19 @@ fn unique(tag: &str) -> Vec<u8> {
     format!("{tag} {} {}", std::process::id(), vk_store::now_ms()).into_bytes()
 }
 
+#[test]
+fn draft_writes_publish_events_without_replacing_the_render_model() {
+    let (_dir, server) = setup("draft-model");
+    let rev = *server.model_rev.borrow();
+    let mut subscribed = server.events.subscribe();
+    let mut tx = Tx::new();
+    tx.m.put("draft", "d", None, &json!({"text": "changed"}));
+    tx.event("draft.updated", json!({}), json!({}));
+    server.with_core(|c| server.commit(c, tx)).unwrap();
+    assert_eq!(*server.model_rev.borrow(), rev);
+    assert_eq!(subscribed.try_recv().unwrap().kind, "draft.updated");
+}
+
 #[tokio::test]
 async fn blob_put_is_ingested_and_read_from_the_one_store() {
     let (_d, s) = setup("put");
@@ -191,7 +204,7 @@ async fn ingest_never_overwrites_an_owner_sidecar() {
     let info = store(&s).find(&hash).unwrap();
     assert_eq!(info.source(), "screenshot");
     // And gc never takes a screenshot, however old and unreferenced.
-    let r = gc(&s, 0, false);
+    let r = gc(&s, 0, false).unwrap();
     assert_eq!(r.removed, 0);
     assert_eq!(r.kept_uncollectable, 1);
     assert!(store(&s).find(&hash).is_some());
