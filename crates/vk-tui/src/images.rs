@@ -211,11 +211,44 @@ pub fn mark_seen(app: &mut App, mi: usize, id: &str) {
     }
 }
 
-/// Clear new-image badges across machines and close the attachment card.
-pub fn dismiss_all(app: &mut App) {
-    app.images_ui.unseen.clear();
+/// Request one bulk deletion per connected machine with full access.
+pub fn delete_all(app: &mut App) {
     crate::card::close(app);
-    app.toast("All images and screenshots marked as seen");
+    for mi in 0..app.machines.len() {
+        let machine = &app.machines[mi];
+        if !machine.capabilities().host {
+            continue;
+        }
+        if !machine.connected() {
+            app.toast(format!("{} is offline", machine.label));
+            continue;
+        }
+        app.command_on(
+            mi,
+            "screenshot.delete_all",
+            json!({"confirm": true}),
+            Pending::Gallery(Reply::RemovedAll),
+        );
+    }
+}
+
+pub fn on_removed_all(app: &mut App, mi: usize, res: Result<Value, RpcErr>) {
+    let label = app.machines[mi].label.clone();
+    match res {
+        Ok(value) => {
+            let ids: Vec<String> = arr(&value, "ids")
+                .iter()
+                .filter_map(|id| id.as_str().map(str::to_owned))
+                .collect();
+            on_deleted(app, mi, &ids);
+            let kept = value["kept"].as_u64().unwrap_or_default();
+            app.toast(format!(
+                "{label}: {} images removed, {kept} kept for accepted reviews",
+                ids.len()
+            ));
+        }
+        Err(e) => app.toast(format!("{label}: {}", e.message)),
+    }
 }
 
 /// Unseen images, newest first.

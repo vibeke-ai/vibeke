@@ -636,7 +636,7 @@ pub const ACTION_INFO: &[(&str, &str)] = &[
         "Re-detect the terminal's light/dark appearance",
     ),
     ("open_images", "View new images"),
-    ("dismiss_all_images", "Dismiss all images and screenshots"),
+    ("dismiss_all_images", "Delete all images and screenshots"),
     ("screenshots", "Screenshot gallery (diff, open, delete)"),
     (
         "screenshot_pane",

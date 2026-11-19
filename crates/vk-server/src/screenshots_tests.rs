@@ -740,6 +740,33 @@ async fn retention_by_age_and_count_keeps_referenced_screenshots() {
         .await
         .unwrap_err();
     assert_eq!(err.data.details["reason"], "referenced_by_acceptance");
+    let extra = e
+        .shot(&shared, e.inputs("pane-a", EnvKind::RemoteHeadless))
+        .await;
+    for (ctx, confirm, kind) in [
+        (ctx_pane("pane-a"), true, "permission_denied"),
+        (ctx_full(), false, "invalid_params"),
+    ] {
+        let err = e
+            .call(&ctx, "screenshot.delete_all", json!({"confirm": confirm}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.data.kind, kind);
+    }
+    assert!(find(&e.server, &extra.id).is_some());
+
+    let cleared = e
+        .call(
+            &ctx_full(),
+            "screenshot.delete_all",
+            json!({"confirm": true}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cleared["ids"], json!([extra.id]));
+    assert_eq!(cleared["kept"], 1);
+    assert!(find(&e.server, &m.id).is_some());
+    assert!(m.path(&e.server).exists());
     let ok = e
         .call(
             &ctx_full(),

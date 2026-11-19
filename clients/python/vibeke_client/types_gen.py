@@ -7127,6 +7127,16 @@ ScreenshotDeleteResult = TypedDict("ScreenshotDeleteResult", {
     "cursor": NotRequired["Cursor"],
 })
 
+ScreenshotDeleteAllParams = TypedDict("ScreenshotDeleteAllParams", {
+    "confirm": bool,
+})
+
+ScreenshotDeleteAllResult = TypedDict("ScreenshotDeleteAllResult", {
+    "ids": List[str],
+    "kept": int,
+    "cursor": NotRequired["Cursor"],
+})
+
 ScreenshotGetParams = TypedDict("ScreenshotGetParams", {
     "id": str,
     "inline": NotRequired[bool],
@@ -9387,6 +9397,7 @@ METHODS: Dict[str, Dict[str, Any]] = {
     "sandbox.stop": {"mutating": True, "scope": "full", "pane_scope": "forbidden"},
     "screenshot.add": {"mutating": True, "scope": "pane", "pane_scope": "open"},
     "screenshot.delete": {"mutating": True, "scope": "pane", "pane_scope": "open"},
+    "screenshot.delete_all": {"mutating": True, "scope": "full", "pane_scope": "forbidden"},
     "screenshot.get": {"mutating": False, "scope": "pane", "pane_scope": "open"},
     "screenshot.list": {"mutating": False, "scope": "pane", "pane_scope": "open"},
     "screenshot.open": {"mutating": False, "scope": "pane", "pane_scope": "open"},

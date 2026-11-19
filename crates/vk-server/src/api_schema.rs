@@ -753,6 +753,7 @@ screenshot.get :: {id: string, inline?: bool, thumb?: int} => ScreenshotMeta
 screenshot.open :: {id: string} => ScreenshotMeta
 screenshot.add :: {data_b64: string, caption?: string, name?: string, pane?: Target} => {id: string, handle: string, workspace?: string|null, task?: string|null, pane?: string|null, run?: string|null, mime: string, width: int, height: int, blob: string, environment: object, caption?: string, source_name?: string, path_on_machine: string, exists: bool, duplicate: bool}
 screenshot.delete :: {id: string, force?: bool} => {id: string, handle: string, deleted: bool, blob_removed: bool}
+screenshot.delete_all :: {confirm: bool} => {ids: [string], kept: int}
 "##;
 
 const MORE_SHAPES: &str = r##"

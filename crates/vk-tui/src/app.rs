@@ -409,6 +409,7 @@ pub enum Action {
     CloseTab(String),
     CloseWorkspace(String),
     Detach,
+    DeleteAllImages,
     /// Forget a task marked missing (`task.forget`).
     ForgetTask {
         machine: usize,
@@ -2436,7 +2437,12 @@ impl App {
         match action {
             "help" => self.mode = Mode::Prefix(PrefixState::menu()),
             "detach" => self.quit = Some("detached".into()),
-            "dismiss_all_images" => crate::images::dismiss_all(self),
+            "dismiss_all_images" => {
+                self.mode = Mode::Popup(Popup::Confirm {
+                    action: Box::new(Action::DeleteAllImages),
+                    message: "Delete images across connected machines?".into(),
+                });
+            }
             "cancel_transfer" => crate::upload::cancel_all(self),
             "review_clipboard" => self.review_clipboard(),
             "split_vertical" | "split_horizontal" => {
@@ -3144,6 +3150,7 @@ impl App {
             Action::CloseWorkspace(w) => {
                 self.command("workspace.close", json!({"workspace": w}), Pending::Ignore)
             }
+            Action::DeleteAllImages => crate::images::delete_all(self),
             Action::Detach => self.quit = Some("detached".into()),
             Action::ForgetTask { machine, task } => crate::taskbadge::forget(self, machine, &task),
             Action::MirrorPreview { machine, preview } => {

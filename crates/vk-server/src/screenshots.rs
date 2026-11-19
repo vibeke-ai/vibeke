@@ -52,6 +52,7 @@ pub const METHODS: &[(&str, bool)] = &[
     ("screenshot.get", false),
     ("screenshot.open", false),
     ("screenshot.delete", true),
+    ("screenshot.delete_all", true),
     ("screenshot.add", true),
     ("browser.diff", true),
 ];
@@ -1330,6 +1331,19 @@ fn delete(server: &Server, ctx: &Ctx, p: &Value) -> R {
     Ok(json!({"id": m.id, "handle": m.handle, "deleted": true, "blob_removed": blobs > 0}))
 }
 
+fn delete_all(server: &Server, p: &Value) -> R {
+    if b(p, "confirm") != Some(true) {
+        return Err(invalid("set confirm to true to delete all screenshots"));
+    }
+    let (kept, gone): (Vec<_>, Vec<_>) = load_all(server)
+        .into_iter()
+        .partition(|m| referenced_by_acceptance(server, m));
+    remove_records_checked(server, &gone, "deleted")
+        .map_err(|_| err(ErrorKind::Internal, "could not delete screenshots"))?;
+    let ids: Vec<_> = gone.iter().map(|m| &m.id).collect();
+    Ok(json!({"ids": ids, "kept": kept.len()}))
+}
+
 // ---- retention ------------------------------------------------------------------------------
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -1367,8 +1381,16 @@ fn referenced_by_acceptance(server: &Server, m: &ScreenshotMeta) -> bool {
 /// Delete records (one transaction + `screenshot.deleted` event) and every blob no remaining
 /// record references. Returns the number of blobs removed.
 pub(crate) fn remove_records(server: &Server, gone: &[ScreenshotMeta], reason: &str) -> usize {
+    remove_records_checked(server, gone, reason).unwrap_or_default()
+}
+
+fn remove_records_checked(
+    server: &Server,
+    gone: &[ScreenshotMeta],
+    reason: &str,
+) -> anyhow::Result<usize> {
     if gone.is_empty() {
-        return 0;
+        return Ok(0);
     }
     {
         let mut c = server.core.lock().unwrap();
@@ -1381,9 +1403,7 @@ pub(crate) fn remove_records(server: &Server, gone: &[ScreenshotMeta], reason: &
             json!({"machine": server.opts.machine}),
             json!({"ids": gone.iter().map(|m| &m.id).collect::<Vec<_>>(), "reason": reason}),
         );
-        if server.commit(&mut c, tx).is_err() {
-            return 0;
-        }
+        server.commit(&mut c, tx)?;
     }
     let still: HashSet<String> = load_all(server).into_iter().map(|m| m.blob).collect();
     let mut n = 0;
@@ -1398,7 +1418,7 @@ pub(crate) fn remove_records(server: &Server, gone: &[ScreenshotMeta], reason: &
         }
         let _ = std::fs::remove_file(p.with_extension("json"));
     }
-    n
+    Ok(n)
 }
 
 /// Apply the retention policy at `now_ms` (injectable for tests). `only_task` limits the run
@@ -1753,6 +1773,7 @@ pub async fn api(server: &Arc<Server>, ctx: &Ctx, method: &str, p: &Value) -> Op
         // `vibeke screenshot open`: the image inline so the CLI can open it locally.
         "screenshot.open" => get(server, ctx, p, true).await,
         "screenshot.delete" => delete(server, ctx, p),
+        "screenshot.delete_all" => delete_all(server, p),
         "screenshot.add" => add(server, ctx, p).await,
         "browser.diff" => diff(server, ctx, p).await,
         _ => return None,

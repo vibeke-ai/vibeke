@@ -1085,6 +1085,9 @@ class Api:
     async def screenshot_delete(self, params: "t.ScreenshotDeleteParams") -> "t.ScreenshotDeleteResult":
         return await self.call("screenshot.delete", params)  # type: ignore[arg-type, return-value]
 
+    async def screenshot_delete_all(self, params: "t.ScreenshotDeleteAllParams") -> "t.ScreenshotDeleteAllResult":
+        return await self.call("screenshot.delete_all", params)  # type: ignore[arg-type, return-value]
+
     async def screenshot_get(self, params: "t.ScreenshotGetParams") -> "t.ScreenshotGetResult":
         return await self.call("screenshot.get", params)  # type: ignore[arg-type, return-value]
 

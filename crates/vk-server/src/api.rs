@@ -487,6 +487,7 @@ impl PaneScope {
 /// The pane scope of `method` (see [`PaneScope`]).
 pub fn pane_scope_of(method: &str) -> PaneScope {
     if PANE_FORBIDDEN.contains(&method)
+        || method == "screenshot.delete_all"
         || crate::security::PANE_FORBIDDEN.contains(&method)
         || crate::plugin_native::PANE_FORBIDDEN.contains(&method)
         || crate::privacy::PANE_FORBIDDEN.contains(&method)

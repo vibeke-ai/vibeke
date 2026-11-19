@@ -132,6 +132,8 @@ Select a row and press `enter`, or click it, to open the image in the viewer. Pr
 
 The **gallery** lists all images of one machine. Open it from the command palette with **Screenshot gallery**, or with `g` in the viewer.
 
+Choose **Delete all images and screenshots** in the command palette to clear the sidebar and galleries across connected machines. Vibeke asks for confirmation once. It keeps screenshots that are part of an accepted review.
+
 ### The viewer
 
 The **viewer** shows one image over the pane area. Open it in one of these ways:

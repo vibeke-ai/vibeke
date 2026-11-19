@@ -6610,6 +6610,16 @@ export type ScreenshotDeleteResult = {
   cursor?: Cursor;
 };
 
+export type ScreenshotDeleteAllParams = {
+  confirm: boolean;
+};
+
+export type ScreenshotDeleteAllResult = {
+  ids: string[];
+  kept: number;
+  cursor?: Cursor;
+};
+
 export type ScreenshotGetParams = {
   id: string;
   inline?: boolean;
@@ -8726,6 +8736,7 @@ export interface Methods {
   "sandbox.stop": { params: SandboxStopParams; result: SandboxStopResult };
   "screenshot.add": { params: ScreenshotAddParams; result: ScreenshotAddResult };
   "screenshot.delete": { params: ScreenshotDeleteParams; result: ScreenshotDeleteResult };
+  "screenshot.delete_all": { params: ScreenshotDeleteAllParams; result: ScreenshotDeleteAllResult };
   "screenshot.get": { params: ScreenshotGetParams; result: ScreenshotGetResult };
   "screenshot.list": { params: ScreenshotListParams; result: ScreenshotListResult };
   "screenshot.open": { params: ScreenshotOpenParams; result: ScreenshotOpenResult };
@@ -9201,6 +9212,7 @@ export const METHOD_INFO: Record<MethodName, { mutating: boolean; scope: "full" 
   "sandbox.stop": { mutating: true, scope: "full", paneScope: "forbidden" },
   "screenshot.add": { mutating: true, scope: "pane", paneScope: "open" },
   "screenshot.delete": { mutating: true, scope: "pane", paneScope: "open" },
+  "screenshot.delete_all": { mutating: true, scope: "full", paneScope: "forbidden" },
   "screenshot.get": { mutating: false, scope: "pane", paneScope: "open" },
   "screenshot.list": { mutating: false, scope: "pane", paneScope: "open" },
   "screenshot.open": { mutating: false, scope: "pane", paneScope: "open" },

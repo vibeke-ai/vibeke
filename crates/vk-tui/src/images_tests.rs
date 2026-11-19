@@ -142,37 +142,36 @@ fn section_follows_needs_you_with_order_styles_and_count() {
 }
 
 #[test]
-fn palette_dismisses_images_on_every_machine_and_keeps_history() {
+fn palette_confirms_bulk_deletion_across_machines() {
     let (mut app, mut rxs) = fleet_n(2);
-    app.config.ui.images.popup = true;
     for (mi, rx) in rxs.iter_mut().enumerate() {
-        let kind = if mi == 0 { "agent" } else { "local_pane" };
-        load(&mut app, rx, mi, vec![rec("S3", kind, "p1", now_ms())], 1);
-        crate::push::on_events(&mut app, mi, vec![captured(1, "S3", "p1", kind)], false);
-        assert_eq!(unseen_count(&app, mi, "p1"), 1);
+        load(
+            &mut app,
+            rx,
+            mi,
+            vec![rec("S3", "agent", "p1", now_ms())],
+            1,
+        );
     }
 
-    assert!(app.images_ui.card.is_some());
-
-    let filter = "dismiss all images".to_string();
+    let filter = "delete all images".to_string();
     let ranked = crate::nav::palette_ranked(&app, &filter);
     assert_eq!(ranked[0].0.id, "dismiss_all_images");
     crate::nav::palette_key(&mut app, named(NamedKey::Enter), filter, 0);
-    assert!(app.images_ui.card.is_none());
+    assert!(matches!(app.mode, Mode::Popup(Popup::Confirm { .. })));
+    assert!(rxs.iter_mut().all(|rx| commands(rx).is_empty()));
+    app.on_key(ch('n'));
+    assert!(rxs.iter_mut().all(|rx| commands(rx).is_empty()));
+
+    app.action("dismiss_all_images", None);
+    app.on_key(ch('y'));
 
     for (mi, rx) in rxs.iter_mut().enumerate() {
-        assert_eq!(unseen_count(&app, mi, "p1"), 0);
-        assert!(shot(&app, mi, "S3").is_some());
-        assert!(commands(rx).is_empty());
+        let (req, params) = only(&commands(rx), "screenshot.delete_all");
+        assert_eq!(params, json!({"confirm": true}));
+        reply(&mut app, mi, req, json!({"ids": ["S3"], "kept": 0}));
+        assert!(shot(&app, mi, "S3").is_none());
     }
-
-    crate::push::on_events(
-        &mut app,
-        0,
-        vec![captured(2, "S4", "p1", "local_pane")],
-        false,
-    );
-    assert_eq!(unseen_count(&app, 0, "p1"), 1);
 }
 
 #[test]

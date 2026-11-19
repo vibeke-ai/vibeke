@@ -609,6 +609,14 @@ fn screenshot_cli_code_state_and_api_without_a_browser() {
     assert_eq!(e["error"]["kind"], "not_found");
     let e = s.try_json(&["browser", "diff", "s1", "s2"]).unwrap_err();
     assert_eq!(e["error"]["kind"], "not_found");
+    let cleared = s.json(&[
+        "api",
+        "call",
+        "screenshot.delete_all",
+        r#"{"confirm":true}"#,
+    ]);
+    assert_eq!(cleared["ids"], json!([]));
+    assert_eq!(cleared["kept"], 0);
     let methods = s.json(&["api", "methods"]);
     for m in [
         "screenshot.list",

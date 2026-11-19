@@ -5016,6 +5016,20 @@
       "result": "{id: string, handle: string, deleted: bool, blob_removed: bool}"
     },
     {
+      "name": "screenshot.delete_all",
+      "mutating": true,
+      "scope": "full",
+      "pane_scope": "forbidden",
+      "gateway": "actor_required",
+      "tables": [
+        "screenshots"
+      ],
+      "milestone": null,
+      "spec": null,
+      "params": "{confirm: bool}",
+      "result": "{ids: [string], kept: int}"
+    },
+    {
       "name": "screenshot.get",
       "mutating": false,
       "scope": "pane",
