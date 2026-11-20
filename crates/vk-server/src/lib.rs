@@ -2165,10 +2165,7 @@ impl Server {
                     )
                 })
                 .collect();
-            // Register first: a retry of the metadata upsert is idempotent. fts_insert
-            // commits all the text together, so a failed batch can go back on the queue.
-            c.store.fts_register_panes(&ids)?;
-            c.store.fts_insert(&rows)
+            c.store.fts_index(&rows, &ids)
         });
         if let Err(err) = result {
             self.fts_buf.lock().unwrap().extend(rows);

@@ -1163,8 +1163,18 @@ impl Store {
     }
 
     pub fn fts_insert(&self, rows: &[ScrollbackIndexRow]) -> Result<()> {
+        self.fts_index(rows, &[])
+    }
+
+    /// Remember which workspace/tab an archived pane belongs to (upsert).
+    pub fn fts_register_panes(&self, panes: &[ArchivePane]) -> Result<()> {
+        self.fts_index(&[], panes)
+    }
+
+    /// Commit searchable rows and their pane metadata together, so a failed batch can be retried.
+    pub fn fts_index(&self, rows: &[ScrollbackIndexRow], panes: &[ArchivePane]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        {
+        if !rows.is_empty() {
             let mut st = tx.prepare(
                 "INSERT INTO scrollback_fts (pane_id, line_no, ts, text) VALUES (?1,?2,?3,?4)",
             )?;
@@ -1172,14 +1182,7 @@ impl Store {
                 st.execute(params![p, *l as i64, ts, t])?;
             }
         }
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// Remember which workspace/tab an archived pane belongs to (upsert).
-    pub fn fts_register_panes(&self, panes: &[ArchivePane]) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
-        {
+        if !panes.is_empty() {
             let mut st = tx.prepare(
                 "INSERT INTO archive_panes (pane_id, workspace, tab, handle, title, updated_at) VALUES (?1,?2,?3,?4,?5,?6)
                  ON CONFLICT(pane_id) DO UPDATE SET workspace=?2, tab=?3, handle=?4, title=?5, updated_at=?6",

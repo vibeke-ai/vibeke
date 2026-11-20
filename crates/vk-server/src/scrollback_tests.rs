@@ -146,6 +146,30 @@ fn a_purge_between_index_batches_clears_just_the_forgotten_rows() {
 }
 
 #[test]
+fn failed_index_batches_keep_their_rows_for_retry() {
+    let e = Env::new();
+    e.server.archive_rows(
+        "p",
+        vec![ArchivedRow {
+            n: 0,
+            t: "needle".into(),
+            w: false,
+        }],
+    );
+    e.server.archive.lock().unwrap().flush().unwrap();
+    e.server
+        .with_core(|c| c.store.set_query_only(true))
+        .unwrap();
+    assert!(e.server.index_scrollback_batch(1).is_err());
+    assert_eq!(e.server.fts_buf.lock().unwrap().len(), 1);
+    e.server
+        .with_core(|c| c.store.set_query_only(false))
+        .unwrap();
+    e.server.housekeeping();
+    assert_eq!(e.fts_rows("p"), 1);
+}
+
+#[test]
 fn archive_failure_retains_rows_and_backs_off_until_the_archive_recovers() {
     let e = Env::new();
     e.server.archive_rows(
