@@ -156,6 +156,14 @@ pub const Writer = struct {
     destination: *std.Io.Writer,
     scratch: std.Io.Writer.Allocating,
     active_tag: ?Tag,
+    page_capture: ?PageCapture = null,
+
+    /// A detached snapshot writes metadata to the destination now and emits
+    /// owned copies of the intervening PAGE records on another thread.
+    pub const PageCapture = struct {
+        context: *anyopaque,
+        append: *const fn (*anyopaque, *const @import("../page.zig").Page) std.Io.Writer.Error!void,
+    };
 
     pub fn init(
         alloc: Allocator,

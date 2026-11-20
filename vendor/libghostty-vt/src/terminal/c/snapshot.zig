@@ -554,6 +554,82 @@ fn continuationValue(bytes: []const u8) snapshot_core.Continuation {
     return if (bytes.len == 0) .ground else .{ .bytes = bytes };
 }
 
+/// Detached captures own every byte needed by the encoder. Page internals
+/// are offsets, so cloneBuf copies each page without walking its cells.
+const Captured = struct {
+    const Page = @import("../page.zig").Page;
+    const Entry = struct { offset: usize, page: Page };
+
+    alloc: std.mem.Allocator,
+    metadata: std.Io.Writer.Allocating,
+    pages: std.ArrayList(Entry) = .empty,
+
+    fn appendPage(ctx: *anyopaque, page: *const Page) std.Io.Writer.Error!void {
+        const self: *Captured = @ptrCast(@alignCast(ctx));
+        self.pages.ensureUnusedCapacity(self.alloc, 1) catch return error.WriteFailed;
+        const memory = self.alloc.alignedAlloc(u8, .fromByteUnits(std.heap.page_size_min), page.memory.len) catch return error.WriteFailed;
+        self.pages.appendAssumeCapacity(.{
+            .offset = self.metadata.written().len,
+            .page = page.cloneBuf(memory),
+        });
+    }
+
+    fn write(self: *Captured, out: *std.Io.Writer) !void {
+        const bytes = self.metadata.written();
+        var stream: snapshot_core.record.Writer = .init(self.alloc, out);
+        defer stream.deinit();
+        var start: usize = 0;
+        for (self.pages.items) |*entry| {
+            try out.writeAll(bytes[start..entry.offset]);
+            try snapshot_core.page.encode(&entry.page, &stream);
+            start = entry.offset;
+        }
+        try out.writeAll(bytes[start..]);
+    }
+};
+
+pub fn capture(terminal: terminal_c.Terminal, out_: ?*?*Captured) callconv(lib.calling_conv) Result {
+    const out = out_ orelse return .invalid_value;
+    out.* = null;
+    const native = terminal_c.zigTerminal(terminal) orelse return .invalid_value;
+    const continuation = continuationOwned(terminal);
+    if (continuation.result != .success) return continuation.result;
+    defer native.gpa().free(continuation.bytes);
+
+    // The capture can outlive the terminal and move to a worker thread.
+    // Never retain its allocator, pages, or parser continuation.
+    const alloc = lib.alloc.default(null);
+    const saved = alloc.create(Captured) catch return .out_of_memory;
+    saved.* = .{ .alloc = alloc, .metadata = .init(alloc) };
+    snapshot_core.encode(alloc, &saved.metadata.writer, native, .{
+        .continuation = continuationValue(continuation.bytes),
+        .page_capture = .{ .context = saved, .append = Captured.appendPage },
+    }) catch |err| {
+        capture_free(saved);
+        return mapEncodeError(err, null);
+    };
+    out.* = saved;
+    return .success;
+}
+
+pub fn capture_free(saved_: ?*Captured) callconv(lib.calling_conv) void {
+    const saved = saved_ orelse return;
+    for (saved.pages.items) |*entry| saved.alloc.free(entry.page.memory);
+    saved.pages.deinit(saved.alloc);
+    saved.metadata.deinit();
+    saved.alloc.destroy(saved);
+}
+
+pub fn capture_write(saved_: ?*Captured, writer: io_c.Writer) callconv(lib.calling_conv) Result {
+    const saved = saved_ orelse return .invalid_value;
+    if (writer.write == null) return .invalid_value;
+    var buffer: [io_c.WriterAdapter.recommended_buffer_len]u8 = undefined;
+    var adapter: io_c.WriterAdapter = .initBuffered(writer, &buffer);
+    saved.write(&adapter.interface) catch |err| return mapEncodeError(err, &adapter);
+    adapter.interface.flush() catch return mapEncodeError(error.WriteFailed, &adapter);
+    return .success;
+}
+
 /// Encode a terminal snapshot to a synchronous C writer callback.
 pub fn encode(
     terminal: terminal_c.Terminal,

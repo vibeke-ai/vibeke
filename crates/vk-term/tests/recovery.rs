@@ -118,6 +118,30 @@ fn c4_snapshot_restore_at_every_4093rd_byte() {
 }
 
 #[test]
+fn worker_encodes_the_captured_history_and_parser_after_the_engine_is_gone() {
+    let mut e = Engine::new(93, 25, 2000);
+    let mut fx = vec![];
+    for i in 0..900 {
+        e.feed(format!("row {i} 🎉\r\n").as_bytes(), &mut fx);
+    }
+    e.feed(b"\x1b[?1049hAlternate\x1b[31;", &mut fx);
+    let reference = e.snapshot();
+    let captured = e.capture_snapshot().unwrap();
+    e.feed(b"1mCHANGED\x1b[?1049l\x1b[3J", &mut fx);
+    e.resize(40, 8);
+    drop(e);
+    let bytes = std::thread::spawn(move || captured.encode().unwrap())
+        .join()
+        .unwrap();
+    assert_eq!(bytes, reference);
+    let mut restored = Engine::restore(&bytes, 2000).unwrap();
+    restored.feed(b"1mcontinued", &mut fx);
+    assert!(restored.screen_text().contains("Alternatecontinued"));
+    restored.feed(b"\x1b[?1049l", &mut fx);
+    assert!(restored.history_len() > 800);
+}
+
+#[test]
 fn cut_inside_every_sequence_kind() {
     let data = synthetic();
     // Exhaustive: cut at every byte offset of the first 3 KiB.

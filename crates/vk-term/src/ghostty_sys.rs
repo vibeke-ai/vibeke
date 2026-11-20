@@ -20,6 +20,11 @@ pub struct GhosttyTerminalImpl {
 }
 pub type GhosttyTerminal = *mut GhosttyTerminalImpl;
 #[repr(C)]
+pub struct GhosttySnapshotCaptureImpl {
+    _p: [u8; 0],
+}
+pub type GhosttySnapshotCapture = *mut GhosttySnapshotCaptureImpl;
+#[repr(C)]
 pub struct GhosttySnapshotDecoderImpl {
     _p: [u8; 0],
 }
@@ -609,6 +614,15 @@ unsafe extern "C" {
         terminal: GhosttyTerminal,
         writer: GhosttyWriter,
     ) -> GhosttyResult;
+    pub fn ghostty_snapshot_capture(
+        terminal: GhosttyTerminal,
+        out: *mut GhosttySnapshotCapture,
+    ) -> GhosttyResult;
+    pub fn ghostty_snapshot_capture_write(
+        capture: GhosttySnapshotCapture,
+        writer: GhosttyWriter,
+    ) -> GhosttyResult;
+    pub fn ghostty_snapshot_capture_free(capture: GhosttySnapshotCapture);
     pub fn ghostty_snapshot_decoder_new_buf(
         allocator: *const GhosttyAllocator,
         decoder: *mut GhosttySnapshotDecoder,

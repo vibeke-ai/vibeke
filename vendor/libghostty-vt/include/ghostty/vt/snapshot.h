@@ -327,6 +327,15 @@ typedef enum GHOSTTY_ENUM_TYPED {
 GHOSTTY_API GhosttyResult ghostty_snapshot_encode(GhosttyTerminal terminal,
                                                   GhosttyWriter writer);
 
+/* An owned, detached capture. The source can change or be destroyed before
+ * the caller encodes the capture on a worker thread. */
+typedef struct GhosttySnapshotCaptureImpl* GhosttySnapshotCapture;
+GHOSTTY_API GhosttyResult ghostty_snapshot_capture(GhosttyTerminal terminal,
+                                                   GhosttySnapshotCapture* out);
+GHOSTTY_API GhosttyResult ghostty_snapshot_capture_write(GhosttySnapshotCapture capture,
+                                                         GhosttyWriter writer);
+GHOSTTY_API void ghostty_snapshot_capture_free(GhosttySnapshotCapture capture);
+
 /**
  * Encode a complete terminal snapshot to a caller-provided buffer.
  *

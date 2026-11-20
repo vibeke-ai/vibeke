@@ -374,6 +374,9 @@ comptime {
             @export(&c.terminal_grid_ref_track, .{ .name = "ghostty_terminal_grid_ref_track" });
         }
         if (features.snapshot) {
+            @export(&c.snapshot_capture, .{ .name = "ghostty_snapshot_capture" });
+            @export(&c.snapshot_capture_free, .{ .name = "ghostty_snapshot_capture_free" });
+            @export(&c.snapshot_capture_write, .{ .name = "ghostty_snapshot_capture_write" });
             @export(&c.snapshot_encode, .{ .name = "ghostty_snapshot_encode" });
             @export(&c.snapshot_encode_buf, .{ .name = "ghostty_snapshot_encode_buf" });
             @export(&c.snapshot_encode_alloc, .{ .name = "ghostty_snapshot_encode_alloc" });

@@ -248,6 +248,63 @@ struct Header {
     extra: Extra,
 }
 
+/// An immutable recovery point independent of the live terminal.
+pub struct CapturedSnapshot {
+    native: NonNull<sys::GhosttySnapshotCaptureImpl>,
+    header: Header,
+    graphics: SavedGraphics,
+}
+
+// SAFETY: the capture owns the page buffers and metadata. Its allocator
+// supports use on another thread and the handle never refers to the Engine.
+unsafe impl Send for CapturedSnapshot {}
+
+impl Drop for CapturedSnapshot {
+    fn drop(&mut self) {
+        unsafe { sys::ghostty_snapshot_capture_free(self.native.as_ptr()) };
+    }
+}
+
+impl CapturedSnapshot {
+    /// Encode the captured pages and the Vibeke envelope on the storage worker.
+    pub fn encode(self) -> Option<Vec<u8>> {
+        encode_snapshot(&self.header, &self.graphics, |writer| unsafe {
+            sys::ghostty_snapshot_capture_write(self.native.as_ptr(), writer)
+        })
+    }
+}
+
+fn encode_snapshot(
+    header: &Header,
+    g: &SavedGraphics,
+    write_terminal: impl FnOnce(sys::GhosttyWriter) -> sys::GhosttyResult,
+) -> Option<Vec<u8>> {
+    let h = postcard::to_stdvec(header).expect("snapshot header serializes");
+    let mut out = Vec::with_capacity(1 << 16);
+    out.extend_from_slice(SNAPSHOT_MAGIC);
+    out.extend_from_slice(&(h.len() as u32).to_le_bytes());
+    out.extend_from_slice(&h);
+    // Optional images section (absent when there are none, so older snapshots and
+    // image-free ones read the same).
+    if !g.images.is_empty()
+        && let Ok(gb) = postcard::to_stdvec(g)
+    {
+        out.extend_from_slice(IMAGES_MAGIC);
+        out.extend_from_slice(&(gb.len() as u32).to_le_bytes());
+        out.extend_from_slice(&gb);
+    }
+    unsafe extern "C" fn write(ud: *mut c_void, data: *const u8, len: usize) -> bool {
+        let v = unsafe { &mut *(ud as *mut Vec<u8>) };
+        v.extend_from_slice(unsafe { bytes(sys::GhosttyString { ptr: data, len }) });
+        true
+    }
+    let w = sys::GhosttyWriter {
+        write: Some(write),
+        userdata: (&raw mut out).cast(),
+    };
+    (write_terminal(w) == sys::GHOSTTY_SUCCESS).then_some(out)
+}
+
 /// Effect-callback state. Heap-allocated so its address (the engine's userdata) is stable;
 /// callbacks run synchronously inside `ghostty_terminal_vt_write`.
 struct CbState {
@@ -1986,7 +2043,16 @@ impl Engine {
     /// the unfinished parser continuation). Empty if the engine refuses to encode (only when a
     /// single unfinished sequence exceeds the continuation limit); `restore` rejects that.
     pub fn snapshot(&self) -> Vec<u8> {
-        let header = Header {
+        encode_snapshot(
+            &self.snapshot_header(),
+            &self.saved_graphics(),
+            |writer| unsafe { sys::ghostty_snapshot_encode(self.term, writer) },
+        )
+        .unwrap_or_default()
+    }
+
+    fn snapshot_header(&self) -> Header {
+        Header {
             engine_version: ENGINE_VERSION.into(),
             extra: Extra {
                 cwd: self.cb_ref().cwd.clone(),
@@ -1994,35 +2060,22 @@ impl Engine {
                 scrolled_total: self.scrolled_total,
                 hist_last: self.hist_last,
             },
-        };
-        let h = postcard::to_stdvec(&header).expect("snapshot header serializes");
-        let mut out = Vec::with_capacity(1 << 16);
-        out.extend_from_slice(SNAPSHOT_MAGIC);
-        out.extend_from_slice(&(h.len() as u32).to_le_bytes());
-        out.extend_from_slice(&h);
-        // Optional images section (absent when there are none, so older snapshots and
-        // image-free ones read the same).
-        let g = self.saved_graphics();
-        if !g.images.is_empty()
-            && let Ok(gb) = postcard::to_stdvec(&g)
+        }
+    }
+
+    /// Capture independent copies of the native pages and continuation at this
+    /// revision. The caller may immediately feed, resize, or drop the engine.
+    pub fn capture_snapshot(&self) -> Option<CapturedSnapshot> {
+        let mut native = ptr::null_mut();
+        if unsafe { sys::ghostty_snapshot_capture(self.term, &mut native) } != sys::GHOSTTY_SUCCESS
         {
-            out.extend_from_slice(IMAGES_MAGIC);
-            out.extend_from_slice(&(gb.len() as u32).to_le_bytes());
-            out.extend_from_slice(&gb);
+            return None;
         }
-        unsafe extern "C" fn write(ud: *mut c_void, data: *const u8, len: usize) -> bool {
-            let v = unsafe { &mut *(ud as *mut Vec<u8>) };
-            v.extend_from_slice(unsafe { bytes(sys::GhosttyString { ptr: data, len }) });
-            true
-        }
-        let w = sys::GhosttyWriter {
-            write: Some(write),
-            userdata: (&raw mut out).cast(),
-        };
-        if unsafe { sys::ghostty_snapshot_encode(self.term, w) } != sys::GHOSTTY_SUCCESS {
-            return Vec::new();
-        }
-        out
+        Some(CapturedSnapshot {
+            native: NonNull::new(native)?,
+            header: self.snapshot_header(),
+            graphics: self.saved_graphics(),
+        })
     }
 
     pub fn restore(bytes: &[u8], scrollback: usize) -> anyhow::Result<Self> {

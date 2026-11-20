@@ -33,6 +33,7 @@ pub const EncodeError = terminal.EncodeError ||
 
 pub const EncodeOptions = struct {
     continuation: Continuation,
+    page_capture: ?record.Writer.PageCapture = null,
 };
 
 /// Encode one complete terminal snapshot.
@@ -55,6 +56,7 @@ pub fn encode(
     var stack_alloc = std.heap.stackFallback(512, alloc);
     var stream: record.Writer = .init(stack_alloc.get(), destination);
     defer stream.deinit();
+    stream.page_capture = options.page_capture;
 
     // 1. Envelope
     try envelope.encode(stream.writer());

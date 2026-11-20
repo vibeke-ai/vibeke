@@ -1371,7 +1371,7 @@ impl PaneLoop {
             self.snapshot_again |= force;
             return Ok(());
         }
-        let (point, blob) = {
+        let (point, capture) = {
             let sc = self.rt.screen.lock().unwrap();
             if !force
                 && sc.last_output.elapsed() < SNAPSHOT_IDLE
@@ -1388,7 +1388,7 @@ impl PaneLoop {
                     revision: sc.rev,
                     offset: sc.fed_offset,
                 },
-                sc.engine.snapshot(),
+                sc.engine.capture_snapshot(),
             )
         };
         let id = self.rt.id.clone();
@@ -1396,7 +1396,11 @@ impl PaneLoop {
         let inc = point.incarnation.clone();
         let (offset, epoch) = (point.offset, point.holder_epoch);
         let worker = tokio::task::spawn_blocking(move || {
-            server.store_snapshot_at_epoch(&id, offset, blob, &inc, (Some(epoch), permit))
+            capture
+                .and_then(|snapshot| snapshot.encode())
+                .is_some_and(|blob| {
+                    server.store_snapshot_at_epoch(&id, offset, blob, &inc, (Some(epoch), permit))
+                })
         });
         self.snapshot = Some(SnapshotJob {
             point,

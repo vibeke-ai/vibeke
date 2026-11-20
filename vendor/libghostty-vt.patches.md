@@ -6,8 +6,12 @@ recorded in `vendor/libghostty-vt.vendor.json`.
 
 ## Active patches
 
-None. `vendor/libghostty-vt/` is a byte-for-byte subset of upstream commit
-`35a81a980bb9fce09a1ea762a68b55f8eb3477ed`.
+**Detached snapshot encoding.** The local `ghostty_snapshot_capture` functions copy
+terminal pages and metadata while the pane owns the terminal. A worker then runs
+the existing page encoder against those copies. This keeps the snapshot format
+compatible. The Rust recovery test compares the two encoders after the source
+has changed and been dropped. Upstream PR pending. Remove this patch when the
+upstream C API provides an independently owned recovery capture.
 
 ## Gaps handled outside the engine instead of patching
 
@@ -31,7 +35,7 @@ the tracker item and re-run the C4 gate (`cargo test --release -p vk-term`).
    tree, excluding `zig-pkg/`) plus `include/`, `src/build/`, `LICENSE` and every
    `pkg/*/build.zig.zon`.
 2. Replace `vendor/libghostty-vt/` with that subset, update `libghostty-vt.vendor.json`, and
-   re-apply the patches above (none today).
+   re-apply the patches above.
 3. Cross-check the build for every target in `crates/vk-term/build.rs`.
 4. Regenerate/verify `crates/vk-term/src/ghostty_sys.rs` against the headers
    (`cargo test -p vk-term ffi_layout` checks struct layouts against `ghostty_type_json()`).

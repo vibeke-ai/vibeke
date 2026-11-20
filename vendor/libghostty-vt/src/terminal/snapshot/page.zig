@@ -143,6 +143,7 @@ pub fn encode(
     page: *const TerminalPage,
     destination: *record.Writer,
 ) EncodeError!void {
+    if (destination.page_capture) |capture| return capture.append(capture.context, page);
     const payload = destination.begin(.page);
     errdefer destination.cancel();
     try encodePayload(page, payload);
