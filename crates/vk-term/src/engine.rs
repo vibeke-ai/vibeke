@@ -174,6 +174,51 @@ struct SavedGraphics {
     places: Vec<SavedPlace>,
 }
 
+/// Native pixels copied while the terminal is locked. RGB and grayscale
+/// retain their compact representation until the worker writes the RGBA archive.
+struct CapturedImage {
+    id: u32,
+    width: u32,
+    height: u32,
+    bytes_per_pixel: usize,
+    data: Vec<u8>,
+}
+
+#[derive(Default)]
+struct CapturedGraphics {
+    images: Vec<CapturedImage>,
+    places: Vec<SavedPlace>,
+}
+
+impl CapturedGraphics {
+    fn into_saved(self) -> SavedGraphics {
+        let images = self
+            .images
+            .into_iter()
+            .map(|image| {
+                let rgba = if image.bytes_per_pixel == 4 {
+                    image.data
+                } else {
+                    let mut rgba =
+                        Vec::with_capacity(image.width as usize * image.height as usize * 4);
+                    extend_rgba(&mut rgba, &image.data, image.bytes_per_pixel);
+                    rgba
+                };
+                SavedImage {
+                    id: image.id,
+                    width: image.width,
+                    height: image.height,
+                    rgba,
+                }
+            })
+            .collect();
+        SavedGraphics {
+            images,
+            places: self.places,
+        }
+    }
+}
+
 /// The output of the last command, from OSC 133 marks (`pane.read --source last-command`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LastCommand {
@@ -252,7 +297,7 @@ struct Header {
 pub struct CapturedSnapshot {
     native: NonNull<sys::GhosttySnapshotCaptureImpl>,
     header: Header,
-    graphics: SavedGraphics,
+    graphics: CapturedGraphics,
 }
 
 // SAFETY: the capture owns the page buffers and metadata. Its allocator
@@ -267,8 +312,9 @@ impl Drop for CapturedSnapshot {
 
 impl CapturedSnapshot {
     /// Encode the captured pages and the Vibeke envelope on the storage worker.
-    pub fn encode(self) -> Option<Vec<u8>> {
-        encode_snapshot(&self.header, &self.graphics, |writer| unsafe {
+    pub fn encode(mut self) -> Option<Vec<u8>> {
+        let graphics = std::mem::take(&mut self.graphics).into_saved();
+        encode_snapshot(&self.header, &graphics, |writer| unsafe {
             sys::ghostty_snapshot_capture_write(self.native.as_ptr(), writer)
         })
     }
@@ -859,6 +905,40 @@ impl Engine {
 
     /// Visible, non-virtual kitty placements of the active screen, bottom z first.
     pub fn image_placements(&self) -> Vec<ImagePlacement> {
+        self.render_placements(false)
+    }
+
+    fn render_placements(&self, virtuals: bool) -> Vec<ImagePlacement> {
+        self.placement_metadata(virtuals)
+            .into_iter()
+            .filter_map(|(p, img)| {
+                let generation = image_u64(img, sys::GHOSTTY_KITTY_IMAGE_DATA_GENERATION);
+                let hash = self.hash_of(img, p.image_id, generation, p.src)?;
+                Some(ImagePlacement {
+                    image_id: p.image_id,
+                    placement_id: p.placement_id,
+                    hash,
+                    width: p.src.2,
+                    height: p.src.3,
+                    col: p.col,
+                    row: p.row,
+                    cols: p.cols,
+                    rows: p.rows,
+                    z: p.z,
+                    virt: p.virt,
+                    src: p.src,
+                    generation,
+                })
+            })
+            .collect()
+    }
+
+    // Handles belong to this engine until its next mutation. Both callers use
+    // them synchronously. A recovery capture never needs a pixel content hash.
+    fn placement_metadata(
+        &self,
+        virtuals: bool,
+    ) -> Vec<(SavedPlace, sys::GhosttyKittyGraphicsImage)> {
         let g: sys::GhosttyKittyGraphics = self.get(sys::GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS);
         let mut out = Vec::new();
         if g.is_null() {
@@ -878,14 +958,23 @@ impl Engine {
             ) == sys::GHOSTTY_SUCCESS
             {
                 while sys::ghostty_kitty_graphics_placement_next(it) {
-                    if let Some(p) = self.placement(g, it) {
+                    let placement = if virtuals {
+                        self.virtual_placement(g, it)
+                    } else {
+                        self.placement(g, it)
+                    };
+                    if let Some(p) = placement {
                         out.push(p);
                     }
                 }
             }
             sys::ghostty_kitty_graphics_placement_iterator_free(it);
         }
-        out.sort_by_key(|p| (p.z, p.row, p.col));
+        if virtuals {
+            out.sort_by_key(|(p, _)| (p.image_id, p.placement_id));
+        } else {
+            out.sort_by_key(|(p, _)| (p.z, p.row, p.col));
+        }
         out
     }
 
@@ -893,7 +982,7 @@ impl Engine {
         &self,
         g: sys::GhosttyKittyGraphics,
         it: sys::GhosttyKittyGraphicsPlacementIterator,
-    ) -> Option<ImagePlacement> {
+    ) -> Option<(SavedPlace, sys::GhosttyKittyGraphicsImage)> {
         let (mut id, mut pid, mut virt, mut z) = (0u32, 0u32, false, 0i32);
         unsafe {
             sys::ghostty_kitty_graphics_placement_get(
@@ -937,70 +1026,39 @@ impl Engine {
         {
             return None;
         }
-        let generation = image_u64(img, sys::GHOSTTY_KITTY_IMAGE_DATA_GENERATION);
-        let src = (
-            info.source_x,
-            info.source_y,
-            info.source_width,
-            info.source_height,
-        );
-        let hash = self.hash_of(img, id, generation, src)?;
-        Some(ImagePlacement {
-            image_id: id,
-            placement_id: pid,
-            hash,
-            width: src.2,
-            height: src.3,
-            col: info.viewport_col,
-            row: info.viewport_row,
-            cols: info.grid_cols,
-            rows: info.grid_rows,
-            z,
-            virt: false,
-            src,
-            generation,
-        })
+        Some((
+            SavedPlace {
+                image_id: id,
+                placement_id: pid,
+                col: info.viewport_col,
+                row: info.viewport_row,
+                cols: info.grid_cols,
+                rows: info.grid_rows,
+                z,
+                virt: false,
+                src: (
+                    info.source_x,
+                    info.source_y,
+                    info.source_width,
+                    info.source_height,
+                ),
+            },
+            img,
+        ))
     }
 
     /// Virtual kitty placements (`U=1`) of the active screen: images the program shows through
     /// its own unicode placeholder cells (03 §9). The pixels are the whole image (or the
     /// placement's source rectangle); `cols`/`rows` are the placement's grid size.
     pub fn virtual_placements(&self) -> Vec<ImagePlacement> {
-        let g: sys::GhosttyKittyGraphics = self.get(sys::GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS);
-        let mut out = Vec::new();
-        if g.is_null() {
-            return out;
-        }
-        unsafe {
-            let mut it: sys::GhosttyKittyGraphicsPlacementIterator = ptr::null_mut();
-            if sys::ghostty_kitty_graphics_placement_iterator_new(ptr::null(), &mut it)
-                != sys::GHOSTTY_SUCCESS
-            {
-                return out;
-            }
-            if sys::ghostty_kitty_graphics_get(
-                g,
-                sys::GHOSTTY_KITTY_GRAPHICS_DATA_PLACEMENT_ITERATOR,
-                (&raw mut it).cast(),
-            ) == sys::GHOSTTY_SUCCESS
-            {
-                while sys::ghostty_kitty_graphics_placement_next(it) {
-                    if let Some(p) = self.virtual_placement(g, it) {
-                        out.push(p);
-                    }
-                }
-            }
-            sys::ghostty_kitty_graphics_placement_iterator_free(it);
-        }
-        out.sort_by_key(|p| (p.image_id, p.placement_id));
-        out
+        self.render_placements(true)
     }
 
     unsafe fn virtual_placement(
         &self,
         g: sys::GhosttyKittyGraphics,
         it: sys::GhosttyKittyGraphicsPlacementIterator,
-    ) -> Option<ImagePlacement> {
+    ) -> Option<(SavedPlace, sys::GhosttyKittyGraphicsImage)> {
         let u32_of = |key: c_int| {
             let mut v = 0u32;
             unsafe { sys::ghostty_kitty_graphics_placement_get(it, key, (&raw mut v).cast()) };
@@ -1044,24 +1102,20 @@ impl Engine {
         if sw == 0 || sh == 0 {
             return None;
         }
-        let src = (sx, sy, sw, sh);
-        let generation = image_u64(img, sys::GHOSTTY_KITTY_IMAGE_DATA_GENERATION);
-        let hash = self.hash_of(img, id, generation, src)?;
-        Some(ImagePlacement {
-            image_id: id,
-            placement_id: pid,
-            hash,
-            width: sw,
-            height: sh,
-            col: 0,
-            row: 0,
-            cols: cols.max(1),
-            rows: rows.max(1),
-            z: 0,
-            virt: true,
-            src,
-            generation,
-        })
+        Some((
+            SavedPlace {
+                image_id: id,
+                placement_id: pid,
+                col: 0,
+                row: 0,
+                cols: cols.max(1),
+                rows: rows.max(1),
+                z: 0,
+                virt: true,
+                src: (sx, sy, sw, sh),
+            },
+            img,
+        ))
     }
 
     /// Content hash of an image cropped to `src` (cached by image, generation and rect).
@@ -1092,57 +1146,47 @@ impl Engine {
     }
 
     /// The images and placements of the active screen, for a snapshot (03 §2.4).
-    fn saved_graphics(&self) -> SavedGraphics {
-        let mut places = self.image_placements();
-        places.extend(self.virtual_placements());
-        let mut out = SavedGraphics::default();
-        if places.is_empty() {
-            return out;
-        }
-        let g: sys::GhosttyKittyGraphics = self.get(sys::GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS);
-        if g.is_null() {
-            return out;
-        }
-        let mut total = 0usize;
-        for p in &places {
-            if !out.images.iter().any(|i| i.id == p.image_id) {
-                let img = unsafe { sys::ghostty_kitty_graphics_image(g, p.image_id) };
-                if img.is_null() {
-                    continue;
-                }
-                let (w, h) = (
-                    image_u32(img, sys::GHOSTTY_KITTY_IMAGE_DATA_WIDTH),
-                    image_u32(img, sys::GHOSTTY_KITTY_IMAGE_DATA_HEIGHT),
-                );
-                let Some(rgba) = crop_rgba(img, (0, 0, w, h)) else {
+    fn capture_graphics(&self, mut remaining: usize) -> CapturedGraphics {
+        let mut captured = CapturedGraphics::default();
+        let mut saved_ids = std::collections::HashSet::new();
+        let places = self
+            .placement_metadata(false)
+            .into_iter()
+            .chain(self.placement_metadata(true));
+        for (place, image) in places {
+            let width = image_u32(image, sys::GHOSTTY_KITTY_IMAGE_DATA_WIDTH);
+            let height = image_u32(image, sys::GHOSTTY_KITTY_IMAGE_DATA_HEIGHT);
+            let (x, y, w, h) = place.src;
+            if x.checked_add(w).is_none_or(|end| end > width)
+                || y.checked_add(h).is_none_or(|end| end > height)
+            {
+                continue;
+            }
+            if !saved_ids.contains(&place.image_id) {
+                let Some(size) = rgba_size(width, height) else {
                     continue;
                 };
-                if total + rgba.len() > SNAPSHOT_IMAGES_MAX {
+                if size > remaining || size > max_image_bytes() {
                     continue;
                 }
-                total += rgba.len();
-                out.images.push(SavedImage {
-                    id: p.image_id,
-                    width: w,
-                    height: h,
-                    rgba,
-                });
+                let Some(image) = with_pixels(image, width, height, |data, bytes_per_pixel| {
+                    CapturedImage {
+                        id: place.image_id,
+                        width,
+                        height,
+                        bytes_per_pixel,
+                        data: data.to_vec(),
+                    }
+                }) else {
+                    continue;
+                };
+                remaining -= size;
+                saved_ids.insert(image.id);
+                captured.images.push(image);
             }
-            if out.images.iter().any(|i| i.id == p.image_id) {
-                out.places.push(SavedPlace {
-                    image_id: p.image_id,
-                    placement_id: p.placement_id,
-                    virt: p.virt,
-                    col: p.col,
-                    row: p.row,
-                    cols: p.cols,
-                    rows: p.rows,
-                    z: p.z,
-                    src: p.src,
-                });
-            }
+            captured.places.push(place);
         }
-        out
+        captured
     }
 
     /// Transmit saved images and placements into a restored engine: images directly (RGBA),
@@ -2045,7 +2089,7 @@ impl Engine {
     pub fn snapshot(&self) -> Vec<u8> {
         encode_snapshot(
             &self.snapshot_header(),
-            &self.saved_graphics(),
+            &self.capture_graphics(SNAPSHOT_IMAGES_MAX).into_saved(),
             |writer| unsafe { sys::ghostty_snapshot_encode(self.term, writer) },
         )
         .unwrap_or_default()
@@ -2074,7 +2118,7 @@ impl Engine {
         Some(CapturedSnapshot {
             native: NonNull::new(native)?,
             header: self.snapshot_header(),
-            graphics: self.saved_graphics(),
+            graphics: self.capture_graphics(SNAPSHOT_IMAGES_MAX),
         })
     }
 
@@ -2330,12 +2374,19 @@ fn image_u64(img: sys::GhosttyKittyGraphicsImage, key: c_int) -> u64 {
     v
 }
 
-/// An image's stored pixels (any kitty format) as RGBA, cropped to `src`.
-fn crop_rgba(img: sys::GhosttyKittyGraphicsImage, src: (u32, u32, u32, u32)) -> Option<Vec<u8>> {
-    let (w, h) = (
-        image_u32(img, sys::GHOSTTY_KITTY_IMAGE_DATA_WIDTH),
-        image_u32(img, sys::GHOSTTY_KITTY_IMAGE_DATA_HEIGHT),
-    );
+fn rgba_size(width: u32, height: u32) -> Option<usize> {
+    (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(4)
+}
+
+/// Borrow native pixels only for the synchronous call to `read`.
+fn with_pixels<T>(
+    img: sys::GhosttyKittyGraphicsImage,
+    width: u32,
+    height: u32,
+    read: impl FnOnce(&[u8], usize) -> T,
+) -> Option<T> {
     let mut fmt = 0i32;
     let mut data: *const u8 = ptr::null();
     let mut len = 0usize;
@@ -2366,30 +2417,48 @@ fn crop_rgba(img: sys::GhosttyKittyGraphicsImage, src: (u32, u32, u32, u32)) -> 
         sys::GHOSTTY_KITTY_IMAGE_FORMAT_GRAY => 1,
         _ => return None,
     };
-    if data.is_null() || len < w as usize * h as usize * bpp {
+    let used = (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(bpp)?;
+    if data.is_null() || len < used {
         return None;
     }
-    let px = unsafe { std::slice::from_raw_parts(data, len) };
-    let (sx, sy, sw, sh) = src;
-    if sx.checked_add(sw)? > w || sy.checked_add(sh)? > h {
-        return None;
+    Some(read(unsafe { std::slice::from_raw_parts(data, used) }, bpp))
+}
+
+fn extend_rgba(out: &mut Vec<u8>, data: &[u8], bpp: usize) {
+    if bpp == 4 {
+        out.extend_from_slice(data);
+        return;
     }
-    if sw as usize * sh as usize * 4 > max_image_bytes() {
-        return None;
-    }
-    let mut out = Vec::with_capacity(sw as usize * sh as usize * 4);
-    for y in sy..sy + sh {
-        let row = &px[(y as usize * w as usize + sx as usize) * bpp..][..sw as usize * bpp];
-        for p in row.chunks_exact(bpp) {
-            match bpp {
-                4 => out.extend_from_slice(p),
-                3 => out.extend_from_slice(&[p[0], p[1], p[2], 255]),
-                2 => out.extend_from_slice(&[p[0], p[0], p[0], p[1]]),
-                _ => out.extend_from_slice(&[p[0], p[0], p[0], 255]),
-            }
+    for p in data.chunks_exact(bpp) {
+        match bpp {
+            3 => out.extend_from_slice(&[p[0], p[1], p[2], 255]),
+            2 => out.extend_from_slice(&[p[0], p[0], p[0], p[1]]),
+            _ => out.extend_from_slice(&[p[0], p[0], p[0], 255]),
         }
     }
-    Some(out)
+}
+
+/// An image's stored pixels (any kitty format) as RGBA, cropped to `src`.
+fn crop_rgba(img: sys::GhosttyKittyGraphicsImage, src: (u32, u32, u32, u32)) -> Option<Vec<u8>> {
+    let (w, h) = (
+        image_u32(img, sys::GHOSTTY_KITTY_IMAGE_DATA_WIDTH),
+        image_u32(img, sys::GHOSTTY_KITTY_IMAGE_DATA_HEIGHT),
+    );
+    let (sx, sy, sw, sh) = src;
+    let size = rgba_size(sw, sh)?;
+    if sx.checked_add(sw)? > w || sy.checked_add(sh)? > h || size > max_image_bytes() {
+        return None;
+    }
+    with_pixels(img, w, h, |px, bpp| {
+        let mut out = Vec::with_capacity(size);
+        for y in sy..sy + sh {
+            let row = &px[(y as usize * w as usize + sx as usize) * bpp..][..sw as usize * bpp];
+            extend_rgba(&mut out, row, bpp);
+        }
+        out
+    })
 }
 
 /// Install the PNG decoder for kitty `f=100` transmissions (process-wide, once).
@@ -2979,6 +3048,38 @@ mod tests {
                 .screen_text()
                 .contains("hello")
         );
+    }
+
+    #[test]
+    fn capture_budgets_expanded_images_before_copying_native_rgb() {
+        let mut e = Engine::new(20, 6, 10);
+        // Two RGB pixels, one real placement and one virtual placement of the same image.
+        fx(
+            &mut e,
+            b"\x1b_Ga=T,i=11,p=1,f=24,s=2,v=1,q=2;AQIDBAUG\x1b\\",
+        );
+        fx(&mut e, b"\x1b_Ga=p,i=11,p=2,U=1,c=1,r=1,q=2\x1b\\");
+        assert!(e.capture_graphics(7).images.is_empty());
+        let captured = e.capture_graphics(8);
+        assert_eq!(captured.images.len(), 1);
+        assert_eq!(captured.places.len(), 2);
+        assert_eq!(captured.images[0].data, [1, 2, 3, 4, 5, 6]);
+        assert!(
+            e.image_hashes.borrow().is_empty(),
+            "capture must not hash pixels"
+        );
+        let captured = e.capture_snapshot().unwrap();
+        let expected = e.snapshot();
+        drop(e);
+        let bytes = captured.encode().unwrap();
+        assert!(bytes == expected);
+        let restored = Engine::restore(&bytes, 10).unwrap();
+        let image = &restored.image_placements()[0];
+        assert_eq!(
+            restored.image_rgba(image).unwrap(),
+            [1, 2, 3, 255, 4, 5, 6, 255]
+        );
+        assert_eq!(restored.virtual_placements()[0].image_id, image.image_id);
     }
 
     /// DCS tmux passthrough (03 §8): unwrapped only when allowed.
