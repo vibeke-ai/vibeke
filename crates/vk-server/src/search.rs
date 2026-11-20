@@ -593,16 +593,15 @@ pub fn forget(server: &Server, ctx: &Ctx, p: &Value) -> R {
         let mut c = server.core.lock().unwrap();
         let r = c
             .store
-            .purge_archive(&mut a, panes.as_deref(), sel, dry_run)
+            .purge_archive_with_pending(
+                &mut a,
+                panes.as_deref(),
+                sel,
+                dry_run,
+                &mut server.fts_buf.lock().unwrap(),
+            )
             .map_err(internal)?;
         if !dry_run {
-            // Rows still waiting for the next FTS flush must not resurrect forgotten text.
-            let mut f = server.fts_buf.lock().unwrap();
-            match (&panes, sel) {
-                (None, Select::All) => f.clear(),
-                (Some(ids), _) => f.retain(|row| !ids.contains(&row.0)),
-                _ => {}
-            }
             // Metadata only: scope and counts, never text.
             let mut tx = crate::core::Tx::new();
             tx.event(

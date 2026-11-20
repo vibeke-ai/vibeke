@@ -231,6 +231,9 @@ pub struct FtsQuery {
     pub limit: usize,
 }
 
+/// Text waiting to be indexed: (pane, absolute line, timestamp, text).
+pub type ScrollbackIndexRow = (String, u64, i64, String);
+
 /// Pane identity recorded for archived rows: (pane, workspace, tab, handle, title).
 pub type ArchivePane = (String, String, String, String, String);
 
@@ -1159,7 +1162,7 @@ impl Store {
         Ok(())
     }
 
-    pub fn fts_insert(&self, rows: &[(String, u64, i64, String)]) -> Result<()> {
+    pub fn fts_insert(&self, rows: &[ScrollbackIndexRow]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         {
             let mut st = tx.prepare(

@@ -104,7 +104,7 @@ use crate::pane::{HolderConn, PaneCmd, PaneRt};
 use crate::paths::Paths;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -190,7 +190,7 @@ pub struct Server {
     pub archive_read_fence: vk_store::archive::ReadFence,
     /// Rows waiting for the next FTS flush. Lock order: `archive` → `core` → `fts_buf`; the
     /// batch is drained and indexed under the archive lock, which purges also hold.
-    pub fts_buf: Mutex<Vec<(String, u64, i64, String)>>,
+    pub fts_buf: Mutex<VecDeque<vk_store::ScrollbackIndexRow>>,
     /// Test hook: runs in [`Server::housekeeping`] right after the FTS batch was drained.
     #[cfg(test)]
     pub(crate) after_fts_drain: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
@@ -396,7 +396,7 @@ impl Server {
             boot_id: ulid(),
             started: Instant::now(),
             restart_error: Mutex::new(None),
-            fts_buf: Mutex::new(Vec::new()),
+            fts_buf: Mutex::new(VecDeque::new()),
             #[cfg(test)]
             after_fts_drain: Mutex::new(None),
             #[cfg(test)]
@@ -2078,54 +2078,24 @@ impl Server {
             // indexing or shutdown. Failed writes are retried by a later pass.
             remaining = remaining.saturating_sub(bytes);
         }
-        // The archive lock is held from the drain until the batch is indexed: `forget` and
-        // retention purge under it, so a purge can't run between the two and have this batch
-        // re-insert text it just deleted (leftovers review finding 7).
-        let mut a = self.archive.lock().unwrap();
-        if flush_all && let Err(e) = a.flush() {
-            drop(a);
+        if flush_all && let Err(e) = self.archive.lock().unwrap().flush() {
             self.archive_failed(format!("archive flush failed: {e:#}"));
             return false;
         }
-        let buffered = a.buffered_starts();
-        let rows = {
-            let mut pending = self.fts_buf.lock().unwrap();
-            let (ready, later): (Vec<_>, Vec<_>) = std::mem::take(&mut *pending)
-                .into_iter()
-                .partition(|row| buffered.get(&row.0).is_none_or(|first| row.1 < *first));
-            *pending = later;
-            ready
-        };
-        if !buffered.is_empty() {
-            // New output arrived while compression ran, or a write needs another attempt.
+        let mut left = self.fts_buf.lock().unwrap().len();
+        while left > 0 {
+            match self.index_scrollback_batch(left) {
+                Ok(0) => break,
+                Ok(examined) => left -= examined,
+                Err(e) => {
+                    self.archive_failed(format!("archive indexing failed: {e:#}"));
+                    return false;
+                }
+            }
+        }
+        let a = self.archive.lock().unwrap();
+        if a.buffered_bytes() != 0 {
             self.housekeeping_wake.notify_one();
-        }
-        #[cfg(test)]
-        if let Some(hook) = self.after_fts_drain.lock().unwrap().as_ref() {
-            hook();
-        }
-        if !rows.is_empty() {
-            let rows = crate::privacy::index_rows(self, rows);
-            let c = self.core.lock().unwrap();
-            let _ = c.store.fts_insert(&rows);
-            // Remember each archived pane's workspace for scoped archive search (09 §5.1).
-            let mut seen: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
-            seen.sort_unstable();
-            seen.dedup();
-            let ids: Vec<vk_store::ArchivePane> = seen
-                .iter()
-                .filter_map(|id| c.pane(id))
-                .map(|p| {
-                    (
-                        p.id.clone(),
-                        p.workspace.clone(),
-                        p.tab.clone(),
-                        p.handle.clone(),
-                        p.display_title().to_string(),
-                    )
-                })
-                .collect();
-            let _ = c.store.fts_register_panes(&ids);
         }
         if self.archive_failure.lock().unwrap().is_some() {
             if let Err(e) = a.probe() {
@@ -2148,6 +2118,65 @@ impl Server {
         true
     }
 
+    /// Keep the archive and SQLite in purge order for one batch. Release both locks
+    /// between batches so pane output and focus can run during a large flush.
+    fn index_scrollback_batch(&self, left: usize) -> Result<usize> {
+        let archive = self.archive.lock().unwrap();
+        let buffered = archive.buffered_starts();
+        let mut rows = Vec::new();
+        let mut examined = 0;
+        {
+            let mut pending = self.fts_buf.lock().unwrap();
+            let limit = left.min(pending.len()).min(256);
+            let mut bytes = 0;
+            while examined < limit && bytes < 128 * 1024 {
+                let row = pending.pop_front().expect("queue length checked");
+                bytes += row.3.len();
+                examined += 1;
+                if buffered.get(&row.0).is_some_and(|first| row.1 >= *first) {
+                    pending.push_back(row);
+                } else {
+                    rows.push(row);
+                }
+            }
+        }
+        if rows.is_empty() {
+            return Ok(examined);
+        }
+        #[cfg(test)]
+        if let Some(hook) = self.after_fts_drain.lock().unwrap().as_ref() {
+            hook();
+        }
+        let rows = crate::privacy::index_rows(self, rows);
+        let mut panes: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+        panes.sort_unstable();
+        panes.dedup();
+        let result = self.with_core(|c| {
+            let ids: Vec<vk_store::ArchivePane> = panes
+                .into_iter()
+                .filter_map(|id| c.pane(id))
+                .map(|p| {
+                    (
+                        p.id.clone(),
+                        p.workspace.clone(),
+                        p.tab.clone(),
+                        p.handle.clone(),
+                        p.display_title().to_string(),
+                    )
+                })
+                .collect();
+            // Register first: a retry of the metadata upsert is idempotent. fts_insert
+            // commits all the text together, so a failed batch can go back on the queue.
+            c.store.fts_register_panes(&ids)?;
+            c.store.fts_insert(&rows)
+        });
+        if let Err(err) = result {
+            self.fts_buf.lock().unwrap().extend(rows);
+            return Err(err);
+        }
+        Ok(examined)
+    }
+
     /// Scrollback retention (`terminal.archive_max_per_pane`, `terminal.archive_days`): delete
     /// the oldest closed segments of every pane together with their `scrollback_fts` rows and
     /// the `archive_panes` rows of panes left with nothing. The segment being written is never
@@ -2165,15 +2194,23 @@ impl Server {
         let _ = a.flush();
         let c = self.core.lock().unwrap();
         if max_bytes > 0 {
-            let _ = c
-                .store
-                .purge_archive(&mut a, None, Select::OverBytes(max_bytes), false);
+            let _ = c.store.purge_archive_with_pending(
+                &mut a,
+                None,
+                Select::OverBytes(max_bytes),
+                false,
+                &mut self.fts_buf.lock().unwrap(),
+            );
         }
         if days > 0 {
             let cutoff = now_ms() - i64::from(days) * 86_400_000;
-            let _ = c
-                .store
-                .purge_archive(&mut a, None, Select::OlderThan(cutoff), false);
+            let _ = c.store.purge_archive_with_pending(
+                &mut a,
+                None,
+                Select::OlderThan(cutoff),
+                false,
+                &mut self.fts_buf.lock().unwrap(),
+            );
         }
     }
 

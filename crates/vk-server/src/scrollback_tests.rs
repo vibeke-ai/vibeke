@@ -123,6 +123,29 @@ fn housekeeping_drains_a_backlog_larger_than_one_compression_batch() {
 }
 
 #[test]
+fn a_purge_between_index_batches_clears_just_the_forgotten_rows() {
+    let e = Env::new();
+    for pane in ["first", "second"] {
+        let rows = (0..300)
+            .map(|n| ArchivedRow {
+                n,
+                t: format!("needle {n}"),
+                w: false,
+            })
+            .collect();
+        e.server.archive_rows(pane, rows);
+    }
+    e.server.archive.lock().unwrap().flush().unwrap();
+    let examined = e.server.index_scrollback_batch(600).unwrap();
+    assert!(examined > 0 && examined < 300);
+    assert_eq!(e.fts_rows("first"), examined);
+    crate::search::forget(&e.server, &ctx_full(), &json!({"pane": "first"})).unwrap();
+    e.server.housekeeping();
+    assert_eq!(e.fts_rows("first"), 0);
+    assert_eq!(e.fts_rows("second"), 300);
+}
+
+#[test]
 fn archive_failure_retains_rows_and_backs_off_until_the_archive_recovers() {
     let e = Env::new();
     e.server.archive_rows(

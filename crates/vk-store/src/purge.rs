@@ -9,11 +9,12 @@
 //! startup by [`Store::recover_archive_purges`] according to whether the journal row committed.
 
 use crate::archive::{Archive, SegInfo, Select, read_seg_lossy};
-use crate::{Store, now_ms};
+use crate::{ScrollbackIndexRow, Store, now_ms};
 use anyhow::Result;
 use rusqlite::types::Value as Sql;
 use rusqlite::{Params, params, params_from_iter};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 /// What a purge removed (or, for a dry run, would remove).
@@ -58,6 +59,18 @@ impl Store {
         panes: Option<&[String]>,
         sel: Select,
         dry_run: bool,
+    ) -> Result<PurgeReport> {
+        self.purge_archive_with_pending(archive, panes, sel, dry_run, &mut VecDeque::new())
+    }
+
+    /// Remove queued index rows covered by the purge at the same commit point.
+    pub fn purge_archive_with_pending(
+        &self,
+        archive: &mut Archive,
+        panes: Option<&[String]>,
+        sel: Select,
+        dry_run: bool,
+        pending: &mut VecDeque<ScrollbackIndexRow>,
     ) -> Result<PurgeReport> {
         let mut ids: Vec<String> = match panes {
             Some(p) => p.to_vec(),
@@ -185,6 +198,21 @@ impl Store {
                 unstage(moved, dir);
             }
             return Err(e);
+        }
+        if whole_all {
+            pending.clear();
+        } else if !pending.is_empty() {
+            ranges.sort_unstable();
+            pending.retain(|(pane, line, ..)| {
+                if (sel == Select::All && ids.binary_search(pane).is_ok())
+                    || emptied.binary_search(pane).is_ok()
+                {
+                    return false;
+                }
+                let end = ranges.partition_point(|(id, start, _)| (id, start) <= (pane, line));
+                !end.checked_sub(1)
+                    .is_some_and(|i| &ranges[i].0 == pane && *line < ranges[i].2)
+            });
         }
         fault("crash_after_commit")?;
         if sel == Select::All {
