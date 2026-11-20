@@ -2134,9 +2134,14 @@ impl Server {
             let mut pending = self.fts_buf.lock().unwrap();
             let limit = left.min(pending.len()).min(256);
             let mut bytes = 0;
-            while examined < limit && bytes < 128 * 1024 {
+            while examined < limit {
+                let next = pending.front().expect("queue length checked").3.len();
+                // A single long row must still make progress on its own.
+                if examined > 0 && bytes + next > 128 * 1024 {
+                    break;
+                }
                 let row = pending.pop_front().expect("queue length checked");
-                bytes += row.3.len();
+                bytes += next;
                 examined += 1;
                 if buffered.get(&row.0).is_some_and(|first| row.1 >= *first) {
                     pending.push_back(row);
