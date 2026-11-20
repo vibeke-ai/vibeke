@@ -52,7 +52,7 @@ tokio.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 futures.workspace = true
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 libc.workspace = true
@@ -72,4 +72,4 @@ regex.workspace = true
 toml.workspace = true
 rusqlite.workspace = true
 # api_schema_live: validate live results with a real JSON Schema 2020-12 validator (no network resolvers).
-jsonschema = { version = "0.58", default-features = false }
+jsonschema = { version = "0.61", default-features = false }
