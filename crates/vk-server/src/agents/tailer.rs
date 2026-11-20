@@ -68,23 +68,68 @@ pub struct TurnUsageRecord {
     pub source: String,
 }
 
+/// The poller owns the parser for one file. Screen and answer handlers read its published
+/// state without locking any parser.
 struct Tail {
     run: String,
     harness: String,
     path: PathBuf,
+    parser: Mutex<Parser>,
+    progress: tokio::sync::watch::Sender<Progress>,
+}
+
+#[derive(Clone, Default)]
+struct Progress {
     offset: u64,
-    caught_up: bool,
-    parser: Parser,
+    parsing: bool,
+    at_boundary: bool,
+    /// Present only at EOF in a Codex transcript. Completed answers can be read even when
+    /// the last record is partial; the pending queue requires a complete record boundary.
+    questions: Option<transcript::QuestionSnapshot>,
+}
+
+impl Progress {
+    fn after(parser: &Parser, offset: u64, caught_up: bool) -> Self {
+        Self {
+            offset,
+            parsing: false,
+            at_boundary: parser.at_record_boundary(),
+            questions: (caught_up && parser.format() == Format::CodexRollout)
+                .then(|| parser.question_snapshot()),
+        }
+    }
+
+    fn pending(&self) -> Option<Vec<transcript::PendingQuestion>> {
+        if !self.at_boundary {
+            return None;
+        }
+        Some(self.questions.as_ref()?.pending.as_ref().clone())
+    }
 }
 
 #[derive(Default)]
 struct Registry {
-    tails: HashMap<PathBuf, Tail>,
+    tails: HashMap<PathBuf, Arc<Tail>>,
     watched: HashSet<PathBuf>,
+}
+
+impl Registry {
+    fn remove_run(&mut self, run: &str) -> Option<Arc<Tail>> {
+        let path = self.tails.values().find(|t| t.run == run)?.path.clone();
+        self.tails.remove(&path)
+    }
 }
 
 static REG: LazyLock<Mutex<Registry>> = LazyLock::new(|| Mutex::new(Registry::default()));
 static LAST_INDEX_MS: AtomicI64 = AtomicI64::new(0);
+
+fn is_current(tail: &Arc<Tail>) -> bool {
+    REG.lock()
+        .unwrap()
+        .tails
+        .get(&tail.path)
+        .is_some_and(|t| Arc::ptr_eq(t, tail))
+}
 
 /// `search.index_transcripts` (default true).
 pub fn index_enabled(cfg: &vk_config::Config) -> bool {
@@ -138,8 +183,13 @@ pub fn track(run: &AgentRun) -> bool {
     let Some(h) = Harness::from_id(&run.harness) else {
         return false;
     };
-    let mut reg = REG.lock().unwrap();
-    if reg.tails.get(&path).is_some_and(|t| t.run == run.id) {
+    if REG
+        .lock()
+        .unwrap()
+        .tails
+        .get(&path)
+        .is_some_and(|t| t.run == run.id)
+    {
         return true;
     }
     // A file may not exist yet (the harness creates it at the first prompt): sniff later.
@@ -152,18 +202,24 @@ pub fn track(run: &AgentRun) -> bool {
     }) else {
         return false;
     };
-    reg.tails.retain(|_, t| t.run != run.id);
-    reg.tails.insert(
+    // Sniffing the file can take time. Recheck before installing the new parser.
+    let mut reg = REG.lock().unwrap();
+    if reg.tails.get(&path).is_some_and(|t| t.run == run.id) {
+        return true;
+    }
+    let old_run = reg.remove_run(&run.id);
+    let old_path = reg.tails.insert(
         path.clone(),
-        Tail {
+        Arc::new(Tail {
             run: run.id.clone(),
             harness: run.harness.clone(),
             path,
-            offset: 0,
-            caught_up: false,
-            parser: Parser::new(fmt),
-        },
+            parser: Mutex::new(Parser::new(fmt)),
+            progress: tokio::sync::watch::channel(Progress::default()).0,
+        }),
     );
+    drop(reg);
+    drop((old_run, old_path));
     true
 }
 
@@ -178,7 +234,8 @@ fn default_format(h: Harness) -> Option<Format> {
 }
 
 pub fn untrack(run: &str) {
-    REG.lock().unwrap().tails.retain(|_, t| t.run != run);
+    let removed = REG.lock().unwrap().remove_run(run);
+    drop(removed);
     super::queued::forget(run);
 }
 
@@ -188,7 +245,7 @@ pub fn tailing() -> Vec<(String, PathBuf, u64)> {
         .unwrap()
         .tails
         .values()
-        .map(|t| (t.run.clone(), t.path.clone(), t.offset))
+        .map(|t| (t.run.clone(), t.path.clone(), t.progress.borrow().offset))
         .collect()
 }
 
@@ -206,102 +263,116 @@ fn read_from(path: &Path, offset: u64, max: u64) -> std::io::Result<(Vec<u8>, u6
 
 /// Read what each tail has not seen yet and apply the events. Returns the events applied.
 pub fn poll_all(server: &Arc<Server>) -> usize {
-    let work: Vec<(PathBuf, String, String, u64)> = {
-        let reg = REG.lock().unwrap();
-        reg.tails
-            .values()
-            .map(|t| (t.path.clone(), t.run.clone(), t.harness.clone(), t.offset))
-            .collect()
-    };
-    let mut total = 0;
-    for (path, run, harness, offset) in work {
-        let Ok((bytes, start)) = read_from(&path, offset, CHUNK) else {
-            continue;
-        };
-        // omp rewrites its title line in place: read it from the head, not the stream.
-        let head = read_from(&path, 0, HEAD).ok().map(|(b, _)| b);
-        let events = {
-            let mut reg = REG.lock().unwrap();
-            let Some(t) = reg.tails.get_mut(&path) else {
-                continue;
-            };
-            if start != t.offset {
-                // The file shrank: a new conversation in the same path.
-                t.parser = Parser::new(t.parser.format());
-            }
-            t.offset = start + bytes.len() as u64;
-            t.caught_up = std::fs::metadata(&path).is_ok_and(|m| t.offset >= m.len());
-            if t.parser.format() == Format::OmpJsonl
-                && let Some(title) = head.as_deref().and_then(transcript::head_title)
-            {
-                t.parser.set_auto_title(title);
-            }
-            let title = t.parser.title().map(str::to_string);
-            if bytes.is_empty() {
-                (vec![], None, None, title, None)
-            } else {
-                let ev = t.parser.feed(&bytes);
-                let totals = t.parser.totals().clone();
-                let model = t.parser.model().map(str::to_string);
-                let title = t.parser.title().map(str::to_string);
-                // Claude records its input queue in the transcript (Send now, `queued.rs`).
-                let queue =
-                    (t.parser.format() == Format::ClaudeJsonl).then(|| t.parser.queued_inputs());
-                (ev, Some(totals), model, title, queue)
-            }
-        };
-        let (ev, totals, model, title, queue) = events;
-        if let Some(q) = queue {
-            super::queued::from_transcript(server, &run, q);
-        }
-        total += ev.len();
-        if let Some(totals) = totals {
-            apply(server, &run, &harness, &ev, &totals, model.as_deref());
-        }
-        set_title(server, &run, &harness, title);
-        if let Some(questions) = pending_questions(&run)
-            && let Some(r) = server.with_core(|c| c.run(&run).cloned())
-        {
-            super::codex_questions::sync(server, &r, &questions);
-            if !bytes.is_empty() {
-                let answers = REG
-                    .lock()
-                    .unwrap()
-                    .tails
-                    .get(&path)
-                    .map(|t| t.parser.question_answers().clone())
-                    .unwrap_or_default();
-                super::codex_questions::sync_answers(server, &r, &answers);
-            }
-        }
-    }
+    let tails: Vec<_> = REG.lock().unwrap().tails.values().cloned().collect();
+    let total = tails.iter().map(|tail| poll(server, tail)).sum();
     if total > 0 {
         index_soon(server);
     }
     total
 }
 
-pub(super) fn pending_questions(run: &str) -> Option<Vec<transcript::PendingQuestion>> {
+fn poll(server: &Arc<Server>, tail: &Arc<Tail>) -> usize {
+    // Concurrent polls must apply one file's events in order. The active poll owns this
+    // tail through delivery; another poll can still make progress on the other files.
+    let Ok(mut parser) = tail.parser.try_lock() else {
+        return 0;
+    };
+    let offset = tail.progress.borrow().offset;
+    let Ok((bytes, start)) = read_from(&tail.path, offset, CHUNK) else {
+        return 0;
+    };
+    if !bytes.is_empty() || start != offset {
+        // Screen observers can skip an in-flight chunk. An answer being delivered waits
+        // for this tail's publication, so it cannot act on a question the chunk retired.
+        tail.progress.send_modify(|p| {
+            p.parsing = true;
+            p.questions = None;
+        });
+    }
+    if start != offset {
+        // The file shrank: a new conversation in the same path.
+        *parser = Parser::new(parser.format());
+    }
+    // omp rewrites its title line in place, independently of appended content.
+    if parser.format() == Format::OmpJsonl
+        && let Ok((head, _)) = read_from(&tail.path, 0, HEAD)
+        && let Some(title) = transcript::head_title(&head)
+    {
+        parser.set_auto_title(title);
+    }
+    let events = if bytes.is_empty() {
+        Vec::new()
+    } else {
+        parser.feed(&bytes)
+    };
+    let offset = start + bytes.len() as u64;
+    let caught_up = std::fs::metadata(&tail.path).is_ok_and(|m| offset >= m.len());
+    let progress = Progress::after(&parser, offset, caught_up);
+    // A /new or a replacement run may have detached this particular parser during the read.
+    if !is_current(tail) {
+        tail.progress.send_replace(Progress::default());
+        return 0;
+    }
+    tail.progress.send_replace(progress.clone());
+    if !bytes.is_empty() {
+        if parser.format() == Format::ClaudeJsonl {
+            super::queued::from_transcript(server, &tail.run, parser.queued_inputs());
+        }
+        apply(
+            server,
+            &tail.run,
+            &tail.harness,
+            &events,
+            parser.totals(),
+            parser.model(),
+        );
+    }
+    set_title(
+        server,
+        &tail.run,
+        &tail.harness,
+        parser.title().map(str::to_string),
+    );
+    if progress.at_boundary
+        && let Some(questions) = progress.questions
+        && is_current(tail)
+        && let Some(run) = server.with_core(|c| c.run(&tail.run).cloned())
+    {
+        super::codex_questions::sync(server, &run, &questions.pending);
+        if !bytes.is_empty() {
+            super::codex_questions::sync_answers(server, &run, &questions.answers);
+        }
+    }
+    events.len()
+}
+
+fn tail_for(run: &str) -> Option<Arc<Tail>> {
     REG.lock()
         .unwrap()
         .tails
         .values()
-        .find(|t| {
-            t.run == run
-                && t.caught_up
-                && t.parser.at_record_boundary()
-                && t.parser.format() == Format::CodexRollout
-        })
-        .map(|t| t.parser.pending_questions().to_vec())
+        .find(|t| t.run == run)
+        .cloned()
+}
+
+pub(super) fn pending_questions(run: &str) -> Option<Vec<transcript::PendingQuestion>> {
+    let progress = tail_for(run)?.progress.borrow().clone();
+    progress.pending()
+}
+
+pub(super) async fn pending_for_delivery(run: &str) -> Option<Vec<transcript::PendingQuestion>> {
+    let tail = tail_for(run)?;
+    let mut rx = tail.progress.subscribe();
+    let progress = rx.wait_for(|p| !p.parsing).await.ok()?.clone();
+    if !is_current(&tail) {
+        return None;
+    }
+    progress.pending()
 }
 
 pub(super) fn question_answer(run: &str, id: &str) -> Option<String> {
-    REG.lock()
-        .unwrap()
-        .tails
-        .values()
-        .find(|t| t.run == run && t.caught_up)
-        .and_then(|t| t.parser.question_answer(id).map(str::to_string))
+    let progress = tail_for(run)?.progress.borrow().clone();
+    progress.questions?.answers.get(id).cloned()
 }
 
 fn apply(
@@ -636,10 +707,13 @@ pub fn sync_runs(server: &Server) {
             .collect()
     });
     let ids: HashSet<&str> = live.iter().map(|r| r.id.as_str()).collect();
-    REG.lock()
+    let removed: Vec<_> = REG
+        .lock()
         .unwrap()
         .tails
-        .retain(|_, t| ids.contains(t.run.as_str()));
+        .extract_if(|_, t| !ids.contains(t.run.as_str()))
+        .collect();
+    drop(removed);
     for r in &live {
         track(r);
     }
@@ -724,6 +798,68 @@ mod tests {
             ),
         );
         assert!(!index_enabled(&off));
+    }
+
+    #[test]
+    fn question_snapshots_preserve_catchup_and_partial_record_boundaries() {
+        let mut parser = Parser::new(Format::CodexRollout);
+        let item = json!({"type":"event_msg", "payload":{"type":"item_completed",
+            "item":{"type":"AgentMessage","id":"q","delivery":"async","questions":[{"title":"Which pane?"}]}}});
+        parser.feed(format!("{item}\n").as_bytes());
+        assert!(Progress::after(&parser, 0, false).pending().is_none());
+        let before = Progress::after(&parser, 0, true);
+        let id = before.pending().unwrap()[0].id.clone();
+        let reply = json!([{"questionItemId":id,"answer":"left"}]);
+        let msg = json!({"type":"response_item","payload":{"type":"message","role":"user",
+            "content":[{"type":"input_text","text":format!("<send_user_message_question_reply>{reply}</send_user_message_question_reply>")}] }});
+        parser.feed(format!("{msg}\n{{").as_bytes());
+        let partial = Progress::after(&parser, 0, true);
+        assert!(partial.pending().is_none());
+        assert_eq!(partial.questions.unwrap().answers[&id], "left");
+        assert_eq!(before.pending().unwrap()[0].id, id);
+        assert!(before.questions.unwrap().answers.is_empty());
+        parser.feed(b"}\n");
+        assert!(
+            Progress::after(&parser, 0, true)
+                .pending()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn in_flight_delivery_cannot_use_a_replaced_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("questions.jsonl");
+        let run_id = ulid();
+        let make_tail = |parsing| {
+            Arc::new(Tail {
+                path: path.clone(),
+                run: run_id.clone(),
+                harness: "codex".into(),
+                parser: Mutex::new(Parser::new(Format::CodexRollout)),
+                progress: tokio::sync::watch::channel(Progress {
+                    parsing,
+                    ..Default::default()
+                })
+                .0,
+            })
+        };
+        let old = make_tail(true);
+        REG.lock().unwrap().tails.insert(path.clone(), old.clone());
+        let delivery = pending_for_delivery(&run_id);
+        tokio::pin!(delivery);
+        tokio::select! {
+            biased;
+            _ = &mut delivery => panic!("answer delivery used an in-flight transcript"),
+            _ = std::future::ready(()) => {}
+        }
+        let replacement = make_tail(false);
+        REG.lock().unwrap().tails.insert(path.clone(), replacement);
+        old.progress
+            .send_replace(Progress::after(&Parser::new(Format::CodexRollout), 0, true));
+        assert!(delivery.await.is_none());
+        REG.lock().unwrap().tails.remove(&path);
     }
 
     #[test]

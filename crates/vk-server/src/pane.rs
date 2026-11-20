@@ -119,6 +119,8 @@ pub struct PaneRt {
     pub rev_tx: watch::Sender<u64>,
     pub cmd_tx: mpsc::UnboundedSender<PaneCmd>,
     pub status: Mutex<Option<ProcStatus>>,
+    /// Per-pane timing for manifest screen rules. Only screen matchers need this lock.
+    pub(crate) screen_holds: Mutex<vk_agents::manifest::HoldTracker>,
     /// Size most recently requested from the holder.
     pub want_size: Mutex<(u16, u16)>,
     pub last_input: Mutex<Option<Instant>>,
@@ -150,6 +152,7 @@ impl PaneRt {
             rev_tx,
             cmd_tx,
             status: Mutex::new(None),
+            screen_holds: Mutex::default(),
             want_size: Mutex::new((cols, rows)),
             last_input: Mutex::new(None),
             last_typed: Mutex::new(None),

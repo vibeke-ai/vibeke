@@ -117,13 +117,9 @@ struct Inner {
     /// harness id → detected version (one `--version` per server lifetime).
     versions: HashMap<String, Option<String>>,
     gates: HashMap<String, Gate>,
-    /// Panes whose input is locked while a verified keystroke sequence runs (04 §8).
-    locks: HashMap<String, Instant>,
     screen_eval: HashMap<String, Instant>,
     /// Panes with a trailing screen evaluation scheduled (see `on_screen`).
     screen_trailing: std::collections::HashSet<String>,
-    /// Per pane: since when each `hold_ms` screen rule has matched (04 §9.1).
-    holds: HashMap<String, vk_agents::manifest::HoldTracker>,
     resume_mode: String,
     /// Self-reported runs whose agent process the process detection has seen. Only these end
     /// when the foreground returns to the pane's shell: a hook-reported agent with no process
@@ -149,6 +145,8 @@ const UNKNOWN_DIALOG_SETTLE: Duration = Duration::from_millis(400);
 #[derive(Default)]
 pub struct Agents {
     inner: Mutex<Inner>,
+    /// Read on every keystroke. Only automated input sequences update these timestamps.
+    input_locks: Mutex<HashMap<String, Instant>>,
 }
 
 pub fn start(server: &Arc<Server>) {
@@ -284,10 +282,9 @@ impl Agents {
     /// Hold the pane's input lock (other clients' and API input is refused) while Vibeke itself
     /// delivers input (keystroke answers, task messages).
     pub fn lock_input(&self, pane: &str) {
-        self.inner
+        self.input_locks
             .lock()
             .unwrap()
-            .locks
             .insert(pane.to_string(), Instant::now());
     }
 
@@ -304,12 +301,12 @@ impl Agents {
     }
 
     pub fn unlock_input(&self, pane: &str) {
-        self.inner.lock().unwrap().locks.remove(pane);
+        self.input_locks.lock().unwrap().remove(pane);
     }
 
     pub fn input_blocked(&self, pane: &str) -> Option<&'static str> {
-        let i = self.inner.lock().unwrap();
-        match i.locks.get(pane) {
+        let locks = self.input_locks.lock().unwrap();
+        match locks.get(pane) {
             Some(t) if t.elapsed() < Duration::from_secs(2) => {
                 Some("input_locked_open_interaction")
             }
@@ -550,9 +547,8 @@ impl Agents {
             false
         };
         let (mut m, pending) = {
-            let mut i = self.inner.lock().unwrap();
-            let hold = i.holds.entry(pane.to_string()).or_default();
-            screen::evaluate_snapshot(h, &snap, now_ms(), Some(hold))
+            let mut holds = rt.screen_holds.lock().unwrap();
+            screen::evaluate_snapshot(h, &snap, now_ms(), Some(&mut holds))
         };
         if codex_question_editor {
             m.dialog = None;
@@ -608,10 +604,9 @@ impl Agents {
         // A verified keystroke walk owns the pane: the picker it is answering stays on screen
         // until the commit, and must not reopen as a new interaction meanwhile.
         if self
-            .inner
+            .input_locks
             .lock()
             .unwrap()
-            .locks
             .get(pane)
             .is_some_and(|t| t.elapsed() < Duration::from_secs(5))
         {
@@ -2807,13 +2802,7 @@ async fn deliver_keystrokes(
     let Some(keys) = screen::keys_for(h, &dialog, &it, answer) else {
         return (DeliveryState::Failed, Some("selection_mismatch".into()));
     };
-    server
-        .agents
-        .inner
-        .lock()
-        .unwrap()
-        .locks
-        .insert(it.pane.clone(), Instant::now());
+    server.agents.lock_input(&it.pane);
     let modes = crate::render::input_modes(server, &it.pane);
     let mut bytes = Vec::new();
     for k in &keys {
@@ -2822,7 +2811,7 @@ async fn deliver_keystrokes(
         }
     }
     let status = rt.input(server.next_internal_input_id(), bytes).await;
-    server.agents.inner.lock().unwrap().locks.remove(&it.pane);
+    server.agents.unlock_input(&it.pane);
     if status == vk_proto::holder::InputStatus::ChildExited {
         return (DeliveryState::Failed, Some("pane exited".into()));
     }
@@ -3917,6 +3906,26 @@ mod tests {
     use super::*;
 
     const DIALOG: &str = "│ Bash command\n│   rm -rf build\n│ Do you want to proceed?\n│ ❯ 1. Yes\n│   2. Yes, and don't ask again\n│   3. No, and tell Claude what to do differently (esc)";
+
+    #[test]
+    fn input_gates_remain_available_during_agent_bookkeeping() {
+        let agents = Agents::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let bookkeeping = agents.inner.lock().unwrap();
+            scope.spawn(|| {
+                agents.lock_input("p1");
+                let blocked =
+                    agents.input_blocked("p1").is_some() && agents.input_blocked("p2").is_none();
+                agents.unlock_input("p1");
+                tx.send(blocked && agents.input_blocked("p1").is_none())
+                    .unwrap();
+            });
+            let result = rx.recv_timeout(Duration::from_secs(5));
+            drop(bookkeeping);
+            assert_eq!(result, Ok(true));
+        });
+    }
 
     #[test]
     fn stale_answer_never_matches_a_replacement_dialog() {

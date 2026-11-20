@@ -14,6 +14,7 @@
 
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -132,6 +133,14 @@ pub struct PendingQuestion {
     pub title: String,
     pub options: Vec<String>,
     pub ts_ms: Option<i64>,
+}
+
+/// Question state from one position in a Codex transcript. Readers can retain it while the
+/// parser advances. Ordinary output shares both collections with the previous snapshot.
+#[derive(Debug, Clone, Default)]
+pub struct QuestionSnapshot {
+    pub pending: Arc<Vec<PendingQuestion>>,
+    pub answers: Arc<HashMap<String, String>>,
 }
 
 /// A Claude `<task-notification>` block.
@@ -267,9 +276,8 @@ pub struct Parser {
     /// The rollout has `SubAgentActivity` items, which say when sub-agents start and end;
     /// inter-agent messages are then not used as ends.
     codex_activity: bool,
-    codex_questions: Vec<PendingQuestion>,
+    codex_questions: QuestionSnapshot,
     codex_question_messages: HashSet<String>,
-    codex_question_answers: HashMap<String, String>,
     activity: Option<Activity>,
     totals: TurnUsage,
     /// A title the user gave the session (Claude `/rename`, pi/omp `/name`); wins over `auto_title`.
@@ -307,9 +315,8 @@ impl Parser {
             codex_start_calls: HashSet::new(),
             codex_calls: HashMap::new(),
             codex_activity: false,
-            codex_questions: vec![],
+            codex_questions: QuestionSnapshot::default(),
             codex_question_messages: HashSet::new(),
-            codex_question_answers: HashMap::new(),
             activity: None,
             totals: TurnUsage::default(),
             user_title: None,
@@ -328,20 +335,24 @@ impl Parser {
         self.activity
     }
 
+    pub fn question_snapshot(&self) -> QuestionSnapshot {
+        self.codex_questions.clone()
+    }
+
     pub fn pending_questions(&self) -> &[PendingQuestion] {
-        &self.codex_questions
+        &self.codex_questions.pending
     }
 
     pub fn question_answered(&self, id: &str) -> bool {
-        self.codex_question_answers.contains_key(id)
+        self.codex_questions.answers.contains_key(id)
     }
 
     pub fn question_answer(&self, id: &str) -> Option<&str> {
-        self.codex_question_answers.get(id).map(String::as_str)
+        self.codex_questions.answers.get(id).map(String::as_str)
     }
 
     pub fn question_answers(&self) -> &HashMap<String, String> {
-        &self.codex_question_answers
+        &self.codex_questions.answers
     }
 
     pub fn at_record_boundary(&self) -> bool {
@@ -862,7 +873,9 @@ impl Parser {
                     });
                 }
                 "task_complete" | "turn_complete" | "turn_aborted" => {
-                    self.codex_questions.clear();
+                    if !self.codex_questions.pending.is_empty() {
+                        self.codex_questions.pending = Arc::default();
+                    }
                     let id = p
                         .get("turn_id")
                         .and_then(Value::as_str)
@@ -992,10 +1005,10 @@ impl Parser {
             let Some(title) = q.get("title").and_then(Value::as_str) else {
                 continue;
             };
-            if self.codex_questions.len() >= INPUTS_MAX {
+            if self.codex_questions.pending.len() >= INPUTS_MAX {
                 break;
             }
-            self.codex_questions.push(PendingQuestion {
+            Arc::make_mut(&mut self.codex_questions.pending).push(PendingQuestion {
                 id: serde_json::json!(["request_user_input_async", id, index]).to_string(),
                 message_id: id.to_string(),
                 title: title.to_string(),
@@ -1029,11 +1042,11 @@ impl Parser {
                 reply.get("questionItemId").and_then(Value::as_str),
                 reply.get("answer").and_then(Value::as_str),
             ) {
-                self.codex_question_answers
+                Arc::make_mut(&mut self.codex_questions.answers)
                     .insert(id.to_string(), answer.to_string());
             }
         }
-        self.codex_questions.retain(|q| {
+        Arc::make_mut(&mut self.codex_questions.pending).retain(|q| {
             let answer = replies
                 .iter()
                 .find(|r| {
@@ -1044,7 +1057,7 @@ impl Parser {
                 .and_then(|r| r.get("answer"))
                 .and_then(Value::as_str);
             if let Some(answer) = answer {
-                self.codex_question_answers
+                Arc::make_mut(&mut self.codex_questions.answers)
                     .insert(q.id.clone(), answer.to_string());
             }
             answer.is_none()

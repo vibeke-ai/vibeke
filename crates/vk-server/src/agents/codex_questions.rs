@@ -685,7 +685,9 @@ async fn deliver_locked(
     let pending = screen_pending(
         server,
         &it.run,
-        tailer::pending_questions(&it.run).unwrap_or_default(),
+        tailer::pending_for_delivery(&it.run)
+            .await
+            .unwrap_or_default(),
     );
     if !pending
         .iter()
