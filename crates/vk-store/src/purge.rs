@@ -668,6 +668,48 @@ mod tests {
     }
 
     #[test]
+    fn retention_keeps_index_rows_for_the_next_unflushed_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let mut a = Archive::new(dir.path());
+        a.append(
+            "p",
+            &[ArchivedRow {
+                n: 0,
+                t: "x".repeat(1 << 20),
+                w: false,
+            }],
+        )
+        .unwrap();
+        a.flush().unwrap();
+        a.append(
+            "p",
+            &[ArchivedRow {
+                n: 1,
+                t: "new".into(),
+                w: false,
+            }],
+        )
+        .unwrap();
+        let mut queue = VecDeque::from([
+            ("p".into(), 0, 1, "old".into()),
+            ("p".into(), 1, 2, "new".into()),
+        ]);
+        let purged = store
+            .purge_archive_with_pending(
+                &mut a,
+                None,
+                Select::OlderThan(i64::MAX),
+                false,
+                &mut queue,
+            )
+            .unwrap();
+        assert_eq!(purged.segments, 1);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].1, 1);
+    }
+
+    #[test]
     fn failed_flush_keeps_rotated_buffers_out_of_retention() {
         let d = tempfile::tempdir().unwrap();
         let (s, mut a) = buffered_rotation(d.path());

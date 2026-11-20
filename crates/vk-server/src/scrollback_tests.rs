@@ -162,6 +162,11 @@ fn failed_index_batches_keep_their_rows_for_retry() {
         .unwrap();
     assert!(e.server.index_scrollback_batch(1).is_err());
     assert_eq!(e.server.fts_buf.lock().unwrap().len(), 1);
+    assert!(
+        e.server.shutdown_housekeeping(),
+        "durable archive permits shutdown even while the derived index is unavailable"
+    );
+    assert!(e.server.archive_failure.lock().unwrap().is_none());
     e.server
         .with_core(|c| c.store.set_query_only(false))
         .unwrap();

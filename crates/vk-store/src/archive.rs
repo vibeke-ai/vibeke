@@ -639,16 +639,27 @@ impl Archive {
     /// current segment and rotated segments with buffered rows; [`Select::All`] includes them.
     pub fn select(&self, pane: &str, sel: Select) -> Vec<SegInfo> {
         let segs = self.segments(pane);
-        let starts: Vec<u64> = segs.iter().map(|p| seg_start(p)).collect();
+        // A newly rotated segment can exist only in memory until its first successful
+        // flush. Its start still bounds the preceding file's FTS deletion range.
+        let mut starts: Vec<u64> = segs.iter().map(|p| seg_start(p)).collect();
+        if let Some(open) = self.open.get(pane) {
+            starts.push(seg_start(&open.path));
+        }
+        if let Some(pending) = self.pending.get(pane) {
+            starts.extend(pending.iter().map(|seg| seg_start(&seg.path)));
+        }
+        starts.sort_unstable();
+        starts.dedup();
         let infos: Vec<SegInfo> = segs
             .iter()
-            .enumerate()
-            .map(|(i, p)| {
+            .map(|p| {
                 let md = std::fs::metadata(p).ok();
+                let start = seg_start(p);
+                let next = starts.partition_point(|s| *s <= start);
                 SegInfo {
                     path: p.clone(),
-                    start: starts[i],
-                    end: starts.get(i + 1).copied().unwrap_or(u64::MAX),
+                    start,
+                    end: starts.get(next).copied().unwrap_or(u64::MAX),
                     bytes: md.as_ref().map(|m| m.len()).unwrap_or(0),
                     mtime_ms: md
                         .and_then(|m| m.modified().ok())

@@ -27,7 +27,7 @@ library. Reasons (spec/03 §2.1):
 | Item | Value |
 |---|---|
 | Upstream | https://github.com/ghostty-org/ghostty @ `35a81a980bb9fce09a1ea762a68b55f8eb3477ed` (2026-10-05, Ghostty 1.3.2-dev, libghostty-vt 0.1.0-dev) |
-| Vendored source | `vendor/libghostty-vt/`: only the files `zig build -Demit-lib-vt` reads (~17 MB, 951 files, unmodified); manifest `vendor/libghostty-vt.vendor.json`, patch log `vendor/libghostty-vt.patches.md` (no patches) |
+| Vendored source | `vendor/libghostty-vt/`: only the files `zig build -Demit-lib-vt` reads (~17 MB). See the manifest `vendor/libghostty-vt.vendor.json` and patch log `vendor/libghostty-vt.patches.md` |
 | Toolchain | Zig `0.16.0` (the pin's `minimum_zig_version`) in `mise.toml` |
 | Build | `crates/vk-term/build.rs`: copies the vendored tree into `OUT_DIR`, runs `zig build -Demit-lib-vt -Doptimize=ReleaseFast -Dtarget=<triple> -Dversion-string=…`, links `libghostty-vt.a` statically. Targets: `aarch64-macos`, `x86_64-macos`, `x86_64-linux-musl`, `aarch64-linux-musl`, `x86_64-linux-gnu`, `aarch64-linux-gnu`. Zig's own dependencies (uucode, highway, wuffs, …) are hash-pinned in `build.zig.zon` and fetched once into the global Zig cache. Clean checkout + empty Zig cache → `cargo test --release -p vk-term` in ~2 min on an M1 Pro |
 | FFI | `crates/vk-term/src/ghostty_sys.rs`, hand-written for exactly the symbols used; the `ffi_layout` test checks every struct layout and enum constant against the library's own ABI manifest (`ghostty_type_json`). Only `engine.rs` uses it |

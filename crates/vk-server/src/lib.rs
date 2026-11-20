@@ -2088,8 +2088,13 @@ impl Server {
                 Ok(0) => break,
                 Ok(examined) => left -= examined,
                 Err(e) => {
-                    self.archive_failed(format!("archive indexing failed: {e:#}"));
-                    return false;
+                    // Text is already durable in the archive. A derived index failure
+                    // must not prevent a restart or pause archive compression.
+                    self.housekeeping_wake.notify_one();
+                    if !vk_store::Store::is_busy(&e) {
+                        tracing::warn!(error = %e, "scrollback search index write failed");
+                    }
+                    break;
                 }
             }
         }
@@ -2165,10 +2170,33 @@ impl Server {
                     )
                 })
                 .collect();
-            c.store.fts_index(&rows, &ids)
+            c.store.fts_index_nowait(&rows, &ids)
         });
         if let Err(err) = result {
-            self.fts_buf.lock().unwrap().extend(rows);
+            let mut pending = self.fts_buf.lock().unwrap();
+            // Keep the oldest batch first on retry. Under a prolonged index outage
+            // bound retry memory; the archive remains available to rebuild the index.
+            for row in rows.into_iter().rev() {
+                pending.push_front(row);
+            }
+            const RETRY_BYTES: usize = 8 << 20;
+            const RETRY_ROWS: usize = 16_384;
+            let mut bytes = 0;
+            let retained = pending
+                .iter()
+                .take(RETRY_ROWS)
+                .take_while(|r| {
+                    bytes += r.3.len();
+                    bytes <= RETRY_BYTES
+                })
+                .count();
+            if retained < pending.len() {
+                tracing::warn!(
+                    count = pending.len() - retained,
+                    "index retry limit reached; use doctor --rebuild-index to index these archived rows"
+                );
+                pending.truncate(retained);
+            }
             return Err(err);
         }
         Ok(examined)

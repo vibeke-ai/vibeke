@@ -1171,8 +1171,21 @@ impl Store {
         self.fts_index(&[], panes)
     }
 
+    /// The background indexer must release the state lock immediately when another
+    /// SQLite writer is busy. Its caller leaves the batch queued for a later pass.
+    pub fn fts_index_nowait(
+        &self,
+        rows: &[ScrollbackIndexRow],
+        panes: &[ArchivePane],
+    ) -> Result<()> {
+        self.conn.busy_timeout(std::time::Duration::ZERO)?;
+        let result = self.fts_index(rows, panes);
+        self.conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        result
+    }
+
     /// Commit searchable rows and their pane metadata together, so a failed batch can be retried.
-    pub fn fts_index(&self, rows: &[ScrollbackIndexRow], panes: &[ArchivePane]) -> Result<()> {
+    fn fts_index(&self, rows: &[ScrollbackIndexRow], panes: &[ArchivePane]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         if !rows.is_empty() {
             let mut st = tx.prepare(
