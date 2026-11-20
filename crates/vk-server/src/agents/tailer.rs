@@ -271,12 +271,35 @@ pub fn poll_all(server: &Arc<Server>) -> usize {
     total
 }
 
+/// A panic leaves the incremental parser at an unknown record. Discard that registration
+/// so the next poll starts from the file, and wake anyone waiting for a safe answer.
+struct PollGuard<'a>(&'a Arc<Tail>);
+
+impl Drop for PollGuard<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            let tail = self.0;
+            let mut reg = REG.lock().unwrap_or_else(|e| e.into_inner());
+            if reg
+                .tails
+                .get(&tail.path)
+                .is_some_and(|t| Arc::ptr_eq(t, tail))
+            {
+                reg.tails.remove(&tail.path);
+            }
+            drop(reg);
+            tail.progress.send_replace(Progress::default());
+        }
+    }
+}
+
 fn poll(server: &Arc<Server>, tail: &Arc<Tail>) -> usize {
     // Concurrent polls must apply one file's events in order. The active poll owns this
     // tail through delivery; another poll can still make progress on the other files.
     let Ok(mut parser) = tail.parser.try_lock() else {
         return 0;
     };
+    let _guard = PollGuard(tail);
     let offset = tail.progress.borrow().offset;
     let Ok((bytes, start)) = read_from(&tail.path, offset, CHUNK) else {
         return 0;
@@ -360,14 +383,20 @@ pub(super) fn pending_questions(run: &str) -> Option<Vec<transcript::PendingQues
     progress.pending()
 }
 
-pub(super) async fn pending_for_delivery(run: &str) -> Option<Vec<transcript::PendingQuestion>> {
-    let tail = tail_for(run)?;
+pub(super) async fn pending_for_delivery(
+    run: &str,
+    wait: Duration,
+) -> Result<Option<Vec<transcript::PendingQuestion>>, tokio::time::error::Elapsed> {
+    let Some(tail) = tail_for(run) else {
+        return Ok(None);
+    };
     let mut rx = tail.progress.subscribe();
-    let progress = rx.wait_for(|p| !p.parsing).await.ok()?.clone();
+    let progress = tokio::time::timeout(wait, rx.wait_for(|p| !p.parsing)).await?;
+    let progress = progress.ok().map(|p| p.clone());
     if !is_current(&tail) {
-        return None;
+        return Ok(None);
     }
-    progress.pending()
+    Ok(progress.and_then(|p| p.pending()))
 }
 
 pub(super) fn question_answer(run: &str, id: &str) -> Option<String> {
@@ -847,19 +876,32 @@ mod tests {
         };
         let old = make_tail(true);
         REG.lock().unwrap().tails.insert(path.clone(), old.clone());
-        let delivery = pending_for_delivery(&run_id);
+        assert!(pending_for_delivery(&run_id, Duration::ZERO).await.is_err());
+        let delivery = pending_for_delivery(&run_id, Duration::from_secs(5));
         tokio::pin!(delivery);
         tokio::select! {
             biased;
             _ = &mut delivery => panic!("answer delivery used an in-flight transcript"),
             _ = std::future::ready(()) => {}
         }
-        let replacement = make_tail(false);
-        REG.lock().unwrap().tails.insert(path.clone(), replacement);
+        let replacement = make_tail(true);
+        REG.lock()
+            .unwrap()
+            .tails
+            .insert(path.clone(), replacement.clone());
         old.progress
             .send_replace(Progress::after(&Parser::new(Format::CodexRollout), 0, true));
-        assert!(delivery.await.is_none());
-        REG.lock().unwrap().tails.remove(&path);
+        assert!(delivery.await.unwrap().is_none());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = PollGuard(&replacement);
+            panic!("interrupted parser");
+        }));
+        assert!(result.is_err());
+        assert!(!replacement.progress.borrow().parsing);
+        assert!(
+            tail_for(&run_id).is_none(),
+            "the next pass must register a fresh parser"
+        );
     }
 
     #[test]

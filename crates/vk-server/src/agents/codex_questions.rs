@@ -682,13 +682,10 @@ async fn deliver_locked(
     if !current_run() {
         return fail(false, "the pane is running a different agent session");
     }
-    let pending = screen_pending(
-        server,
-        &it.run,
-        tailer::pending_for_delivery(&it.run)
-            .await
-            .unwrap_or_default(),
-    );
+    let Ok(pending) = tailer::pending_for_delivery(&it.run, WAIT).await else {
+        return fail(false, "timed out waiting for the current transcript");
+    };
+    let pending = screen_pending(server, &it.run, pending.unwrap_or_default());
     if !pending
         .iter()
         .any(|q| it.questions.first().is_some_and(|asked| asked.id == q.id))
