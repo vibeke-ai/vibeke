@@ -111,7 +111,9 @@ test('conversation: transcript turns, tool rows, footer, composer, view toggle, 
   await expect(page).toHaveURL(/#\/w\/[^/]+\/[^/?]+/);
 
   // The agent tab is selected and shows its conversation.
-  await expect(page.getByRole('tab', { selected: true })).toHaveAttribute('data-tab', /^a:/);
+  const strip = page.getByRole('tablist', { name: 'Tabs' });
+  const agentTab = strip.getByRole('tab', { selected: true });
+  await expect(agentTab).toHaveAttribute('data-tab', /^a:/);
   const log = page.getByRole('log', { name: 'Conversation' });
   await expect(log.locator('[data-role="user"]').filter({ hasText: 'Rebuild the homepage hero' })).toBeVisible({ timeout: 30_000 });
   await expect(log.getByText('Ready for review.')).toBeVisible();
@@ -179,8 +181,6 @@ test('conversation: transcript turns, tool rows, footer, composer, view toggle, 
   await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeVisible();
 
   // Tabs: one tab per agent (no separate Terminal tab), one tab stop; tab ↔ panel linked.
-  const strip = page.getByRole('tablist', { name: 'Tabs' });
-  const agentTab = strip.getByRole('tab', { selected: true });
   await expect(agentTab).toHaveAttribute('tabindex', '0');
   await expect(strip.getByRole('tab', { name: 'Terminal' })).toHaveCount(0);
   const panelId = await agentTab.getAttribute('aria-controls');
