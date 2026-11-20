@@ -524,11 +524,17 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let (stop2, root2) = (stop.clone(), root.clone());
         let writer = std::thread::spawn(move || {
+            // Rename complete versions into place. A truncating write would also
+            // publish an empty file, outside the numbered states asserted below.
+            let staged = root2.join(".git/snapshot-test-write.tmp");
             let mut i = 0u64;
             while !stop2.load(Ordering::Relaxed) {
                 i += 1;
-                std::fs::write(root2.join("a.txt"), format!("w {i}\n")).unwrap();
-                std::fs::write(root2.join("b.txt"), format!("w {i}\n")).unwrap();
+                let contents = format!("w {i}\n");
+                for name in ["a.txt", "b.txt"] {
+                    std::fs::write(&staged, &contents).unwrap();
+                    std::fs::rename(&staged, root2.join(name)).unwrap();
+                }
                 std::thread::sleep(Duration::from_millis(1));
             }
         });
