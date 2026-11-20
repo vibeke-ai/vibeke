@@ -97,6 +97,111 @@ fn native_key_and_ack_do_not_spend_the_echo_paint_budget() {
     }
 }
 
+fn pane_delta(rev: u64, changes: Vec<(u16, Row)>) -> ServerFrame {
+    ServerFrame::PaneDiff {
+        pane: "p1".into(),
+        epoch: 1,
+        base_rev: rev - 1,
+        rev,
+        ops: vec![DiffOp::Rows(changes)],
+        cursor: Cursor {
+            visible: true,
+            row: 2,
+            col: rev as u16,
+            ..Cursor::default()
+        },
+        modes: PaneModes::default(),
+        title: String::new(),
+    }
+}
+
+#[test]
+fn native_pane_damage_repaints_only_changed_host_rows_and_matches_full_frames() {
+    let mut sparse = ready(true);
+    let mut full = ready(true);
+    let rect = sparse.tiled_rects()[0].1;
+    let mut linked = row("a界🍏");
+    linked.links.push(Link {
+        col: 1,
+        cols: 2,
+        uri: "https://example.com".into(),
+    });
+    // Accumulate several updates before a write, including two changes to the same row.
+    let bursts = [
+        vec![
+            pane_delta(2, vec![(1, row("first")), (2, linked)]),
+            pane_delta(3, vec![(1, row("replacement"))]),
+        ],
+        vec![pane_delta(4, vec![(2, row("a"))])],
+        vec![pane_delta(5, vec![])],
+    ];
+    for (burst, offsets) in bursts.into_iter().zip([vec![1, 2], vec![2], vec![]]) {
+        for frame in burst {
+            sparse.on_frame(0, frame.clone());
+            full.on_frame(0, frame);
+        }
+        assert!(sparse.needs_paint());
+        // Isolate the pane-only case from wall clock changes in the host running the test.
+        sparse.repaint_by = None;
+        full.dirty = true;
+        assert_eq!(sparse.draw_frame(true), full.draw_frame(true));
+        assert_eq!(sparse.prev, full.prev);
+        assert_eq!(sparse.last_cursor, full.last_cursor);
+        let rows = sparse.scratch.paint_rows.as_ref().expect("pane-only draw");
+        let painted: Vec<_> = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(y, &paint)| paint.then_some(y as u16))
+            .collect();
+        assert_eq!(
+            painted,
+            offsets.into_iter().map(|y| rect.y + y).collect::<Vec<_>>()
+        );
+        assert!(!sparse.needs_paint());
+    }
+}
+
+#[test]
+fn native_pane_damage_yields_to_overlay_resize_deadline_and_local_invalidation() {
+    for change in ["overlay", "resize", "deadline", "invalidate", "scroll"] {
+        let mut app = ready(false);
+        app.on_frame(0, pane_delta(2, vec![(3, row("echo"))]));
+        match change {
+            "overlay" => {
+                app.mode = Mode::Popup(Popup::Message {
+                    title: "Title".into(),
+                    body: "Body".into(),
+                })
+            }
+            "resize" => app.size.0 += 8,
+            "deadline" => app.repaint_by = Some(Instant::now()),
+            "invalidate" => app.invalidate(crate::screen::Rect {
+                x: 1,
+                y: 1,
+                w: 1,
+                h: 1,
+            }),
+            "scroll" => {
+                let mut frame = pane_delta(3, vec![(0, row("after scroll"))]);
+                if let ServerFrame::PaneDiff { ops, .. } = &mut frame {
+                    ops.insert(0, DiffOp::ScrollUp { n: 1 });
+                }
+                app.on_frame(0, frame);
+            }
+            _ => unreachable!(),
+        }
+        app.draw_frame(true);
+        assert!(
+            app.scratch.paint_rows.is_none(),
+            "{change} requires a complete frame"
+        );
+        let mut reference = Grid::new(app.size.0, app.size.1);
+        let cursor = draw::compose(&app, &mut reference);
+        assert_eq!(app.prev, reference, "{change}");
+        assert_eq!(app.last_cursor, Some(cursor));
+    }
+}
+
 #[test]
 fn native_cursor_title_media_and_invalidations_always_write() {
     let mut app = ready(false);

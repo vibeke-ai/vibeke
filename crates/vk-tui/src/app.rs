@@ -13,7 +13,7 @@ use crate::{draw, paste, term};
 use anyhow::Context;
 use anyhow::Result;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
@@ -524,7 +524,13 @@ pub struct App {
     scratch: Grid,
     host_scroll: bool,
     last_cursor: Option<Option<(u16, u16, vk_proto::render::CursorShape)>>,
+    /// A layout, chrome or host change requires a complete composition.
     pub dirty: bool,
+    /// Native ordinary pane diffs can instead repaint just these pane-relative rows.
+    /// An empty set for a pane still schedules a cursor update.
+    pane_damage: HashMap<String, BTreeSet<u16>>,
+    /// A timed label or overlay may change even during continuous pane output.
+    repaint_by: Option<Instant>,
     pub quit: Option<String>,
     pub host_focused: bool,
     pub last_mouse_pane: Option<String>,
@@ -839,7 +845,7 @@ async fn run_inner(
     let mut last_draw = Instant::now() - Duration::from_secs(1);
     let mut appearance_write = false;
     let reason = 'ui: loop {
-        if app.dirty && !output.busy {
+        if app.needs_paint() && !output.busy {
             let wait = Duration::from_millis(1000 / 120).saturating_sub(last_draw.elapsed());
             if wait.is_zero() {
                 let frame = app.draw_frame(true);
@@ -879,7 +885,7 @@ async fn run_inner(
             output.submit(crate::appearance::QUERIES.to_vec())?;
             appearance_write = true;
         }
-        let redraw_in = if app.dirty && !output.busy {
+        let redraw_in = if app.needs_paint() && !output.busy {
             Duration::from_millis(1000 / 120).saturating_sub(last_draw.elapsed())
         } else {
             Duration::from_secs(3600)
@@ -887,7 +893,12 @@ async fn run_inner(
         // No fixed tick (spec 10 §1.3.1): sleep until the earliest armed deadline, or until
         // input / a server frame when nothing needs time.
         let now = Instant::now();
-        let wake = crate::deadline::wake_at(app.next_deadline(now), now);
+        let next = app
+            .next_deadline(now)
+            .into_iter()
+            .chain(app.repaint_by)
+            .min();
+        let wake = crate::deadline::wake_at(next, now);
         let timer = async move {
             match wake {
                 Some(t) => tokio::time::sleep_until(tokio::time::Instant::from_std(t)).await,
@@ -987,6 +998,8 @@ impl App {
             host_scroll: false,
             last_cursor: None,
             dirty: true,
+            pane_damage: HashMap::new(),
+            repaint_by: None,
             quit: None,
             host_focused: true,
             last_mouse_pane: None,
@@ -1404,7 +1417,8 @@ impl App {
     pub(crate) fn on_frame(&mut self, i: usize, f: ServerFrame) {
         self.dirty |= !matches!(
             f,
-            ServerFrame::Pong { .. }
+            ServerFrame::PaneDiff { .. }
+                | ServerFrame::Pong { .. }
                 | ServerFrame::InputAck {
                     status: AckStatus::Written,
                     ..
@@ -1514,9 +1528,16 @@ impl App {
             } => {
                 let ok = match self.machines[i].panes.get_mut(&pane) {
                     Some(b) if b.epoch == epoch && b.rev == base_rev => {
+                        self.dirty |= cfg!(target_arch = "wasm32")
+                            || i != self.cur
+                            || b.title != title
+                            || b.modes != modes;
+                        let mut damage = (!self.dirty)
+                            .then(|| self.pane_damage.entry(pane.clone()).or_default());
                         for op in ops {
                             match op {
                                 DiffOp::ScrollUp { n } => {
+                                    self.dirty = true;
                                     let n = (n as usize).min(b.lines.len());
                                     b.pending_scroll = b.pending_scroll.saturating_add(n as u16);
                                     b.lines.drain(..n);
@@ -1526,6 +1547,9 @@ impl App {
                                 DiffOp::Rows(rows) => {
                                     for (y, r) in rows {
                                         if let Some(slot) = b.lines.get_mut(y as usize) {
+                                            if let Some(damage) = damage.as_deref_mut() {
+                                                damage.insert(y);
+                                            }
                                             *slot = r;
                                         }
                                     }
@@ -1968,7 +1992,8 @@ impl App {
     /// A deadline woke the loop: repaint when a redraw-only one passed (an age label, the
     /// confirm countdown, the clock); `on_tick` follows and handles the rest.
     pub(crate) fn on_deadline(&mut self, now: Instant) {
-        if self.deadlines(now).redraw_due(now) {
+        if self.repaint_by.is_some_and(|t| t <= now) || self.deadlines(now).redraw_due(now) {
+            self.repaint_by = None;
             self.dirty = true;
         }
     }
@@ -3240,6 +3265,42 @@ impl App {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn needs_paint(&self) -> bool {
+        self.dirty || !self.pane_damage.is_empty()
+    }
+
+    /// Translate tiled pane damage into host rows after the sidebar width is final.
+    /// Chrome and split borders are composed on each of those rows as usual.
+    fn damaged_host_rows(&self) -> Option<Vec<bool>> {
+        if self.pane_damage.is_empty()
+            || self.dirty
+            || self.size != (self.prev.cols, self.prev.rows)
+            || self.repaint_by.is_some_and(|t| Instant::now() >= t)
+            || !matches!(self.mode, Mode::Normal)
+            || self.gateway.modal()
+            || crate::card::showing(self).is_some()
+            || !crate::floats::visible(self).is_empty()
+            || !crate::plugins::surfaces(self).is_empty()
+            || !self.browser.panes.is_empty()
+            || self.images.has_host_images()
+            || self.imgview.has_placements()
+        {
+            return None;
+        }
+        let mut rows = vec![false; self.size.1 as usize];
+        for (pane, rect) in self.tiled_rects() {
+            if let Some(changed) = self.pane_damage.get(&pane) {
+                for &y in changed.range(..rect.h) {
+                    if let Some(paint) = rows.get_mut(rect.y as usize + y as usize) {
+                        *paint = true;
+                    }
+                }
+            }
+        }
+        Some(rows)
+    }
+
     /// Compose one frame without choosing the host output device.
     #[cfg(any(target_arch = "wasm32", test))]
     pub(crate) fn draw_bytes(&mut self) -> Vec<u8> {
@@ -3249,7 +3310,7 @@ impl App {
     /// Native frames preserve the paint budget when observers find no visual change.
     /// WASM retains its existing output/pacing contract.
     fn draw_frame(&mut self, skip_unchanged: bool) -> Vec<u8> {
-        self.dirty = false;
+        let full = std::mem::take(&mut self.dirty);
         self.send_view_hints(false);
         crate::browser::update_views(self);
         crate::preview_ui::observe(self);
@@ -3266,9 +3327,14 @@ impl App {
         let mut grid = std::mem::replace(&mut self.scratch, Grid::new(0, 0));
         if grid.cols != cols || grid.rows != rows {
             grid = Grid::new(cols, rows);
-        } else {
-            grid.clear();
         }
+        grid.paint_rows = if skip_unchanged && !full {
+            self.damaged_host_rows()
+        } else {
+            None
+        };
+        self.pane_damage.clear();
+        grid.clear();
         let cursor = draw::compose_with_sidebar(self, &mut grid, &sidebar_rows);
         crate::image_view::after_compose(self, &grid);
         // Browser tile images first; their placeholder cells follow in the grid diff.
@@ -3291,7 +3357,21 @@ impl App {
                 pane.pending_scroll = 0;
             }
         }
-        self.scratch = std::mem::replace(&mut self.prev, grid);
+        if grid.paint_rows.is_some() {
+            grid.commit_rows(&mut self.prev);
+            self.scratch = grid;
+        } else {
+            self.scratch = std::mem::replace(&mut self.prev, grid);
+            if skip_unchanged {
+                self.repaint_by = self
+                    .deadlines(Instant::now())
+                    .items()
+                    .iter()
+                    .filter(|deadline| deadline.redraw)
+                    .map(|deadline| deadline.at)
+                    .min();
+            }
+        }
         // These observers also produce one-shot media output and must run on no-op frames.
         crate::browser::after_write(self, &mut out);
         crate::image_view::after_write(self, &mut out);
@@ -3351,6 +3431,8 @@ impl App {
     /// is not part of the grid, so blank cells under a removed image would otherwise compare
     /// equal and leave the image on screen.
     pub fn invalidate(&mut self, r: crate::screen::Rect) {
+        self.pane_damage.clear();
+        self.dirty = true;
         // Never produced by drawing (control characters have no width), so never equal.
         let unknown = crate::screen::Cell {
             text: crate::screen::CellText::new("\u{1}"),

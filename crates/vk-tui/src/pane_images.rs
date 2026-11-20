@@ -70,7 +70,7 @@ pub struct State {
 
 impl State {
     pub(crate) fn has_host_images(&self) -> bool {
-        !self.host.is_empty() || !self.out.is_empty()
+        !self.places.is_empty() || !self.host.is_empty() || !self.out.is_empty()
     }
 }
 

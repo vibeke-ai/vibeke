@@ -102,6 +102,8 @@ pub struct Grid {
     pub cols: u16,
     pub rows: u16,
     pub cells: Vec<Cell>,
+    /// Present only on the scratch grid during a native pane-only paint.
+    pub(crate) paint_rows: Option<Vec<bool>>,
 }
 
 /// A pane's projected rows. Compare the source row itself, not a revision: callers may
@@ -124,6 +126,17 @@ impl RowCache {
             .len()
             .min(rect.h as usize)
             .min(grid.rows.saturating_sub(rect.y) as usize);
+        if grid.paint_rows.is_some() {
+            // A sparse frame needs only the changed host rows. Leave the full-frame
+            // cache intact; its next use compares each source row before blitting.
+            for (y, row) in source.iter().take(height).enumerate() {
+                let gy = rect.y + y as u16;
+                if grid.paints(gy) {
+                    grid.put_row(rect.x, gy, row, width);
+                }
+            }
+            return;
+        }
         if width != self.width {
             self.width = width;
             self.rows.clear();
@@ -178,6 +191,7 @@ impl Grid {
             cols,
             rows,
             cells: vec![Cell::blank(Style::default()); cols as usize * rows as usize],
+            paint_rows: None,
         }
     }
 
@@ -194,7 +208,34 @@ impl Grid {
         &self.cells[s..s + self.cols as usize]
     }
 
+    pub(crate) fn paints(&self, y: u16) -> bool {
+        self.paint_rows
+            .as_ref()
+            .is_none_or(|rows| rows.get(y as usize) == Some(&true))
+    }
+
+    /// Only the selected scratch rows represent the new frame. Retain the rest
+    /// of the previous host grid, including chrome and other panes.
+    pub(crate) fn commit_rows(&self, prev: &mut Grid) {
+        for y in 0..self.rows {
+            if self.paints(y) {
+                let start = self.idx(0, y);
+                prev.cells[start..start + self.cols as usize].clone_from_slice(self.row(y));
+            }
+        }
+    }
+
     pub fn clear(&mut self) {
+        if self.paint_rows.is_some() {
+            for y in 0..self.rows {
+                if self.paints(y) {
+                    let start = self.idx(0, y);
+                    self.cells[start..start + self.cols as usize]
+                        .fill(Cell::blank(Style::default()));
+                }
+            }
+            return;
+        }
         let blank = Cell::blank(Style::default());
         self.cells.iter_mut().for_each(|c| *c = blank.clone());
     }
@@ -203,6 +244,9 @@ impl Grid {
         let x1 = rect.x.saturating_add(rect.w).min(self.cols);
         let y1 = rect.y.saturating_add(rect.h).min(self.rows);
         for y in rect.y..y1 {
+            if !self.paints(y) {
+                continue;
+            }
             for x in rect.x..x1 {
                 self.put_cell(x, y, Cell::blank(style));
             }
@@ -238,6 +282,7 @@ impl Grid {
         if y >= self.rows || x >= self.cols {
             return 0;
         }
+        let paint = self.paints(y);
         let limit = max_cols.min(self.cols - x) as usize;
         let mut used = 0usize;
         for g in s.graphemes(true) {
@@ -247,21 +292,25 @@ impl Grid {
             }
             if used + w > limit {
                 if used < limit {
-                    self.put_cell(x + used as u16, y, Cell::blank(style));
+                    if paint {
+                        self.put_cell(x + used as u16, y, Cell::blank(style));
+                    }
                     used += 1;
                 }
                 break;
             }
-            self.put_cell(
-                x + used as u16,
-                y,
-                Cell {
-                    text: CellText::new(g),
-                    width: w as u8,
-                    style,
-                    link: None,
-                },
-            );
+            if paint {
+                self.put_cell(
+                    x + used as u16,
+                    y,
+                    Cell {
+                        text: CellText::new(g),
+                        width: w as u8,
+                        style,
+                        link: None,
+                    },
+                );
+            }
             used += w;
         }
         used as u16
@@ -270,7 +319,7 @@ impl Grid {
     /// Write one cell holding `text` (a single grapheme, e.g. a kitty unicode placeholder with
     /// its diacritics) without re-measuring it.
     pub fn put_grapheme(&mut self, x: u16, y: u16, text: &str, style: Style) {
-        if x < self.cols && y < self.rows {
+        if x < self.cols && y < self.rows && self.paints(y) {
             self.put_cell(
                 x,
                 y,
@@ -296,6 +345,9 @@ impl Grid {
             used += self.put_str(nx, y, &span.text, span.style, max_cols - used);
         }
         // OSC 8 links (03 §8) on the cells they cover.
+        if !self.paints(y) {
+            return used;
+        }
         for l in &row.links {
             let uri: Arc<str> = Arc::from(l.uri.as_str());
             for c in l.col..l.col.saturating_add(l.cols).min(used) {
@@ -313,7 +365,7 @@ impl Grid {
 
     /// Add `attrs` to `w` cells from (`x`, `y`), clipped (link hover underline).
     pub fn add_attrs(&mut self, x: u16, y: u16, w: u16, attrs: u16) {
-        if y >= self.rows {
+        if y >= self.rows || !self.paints(y) {
             return;
         }
         for cx in x..x.saturating_add(w).min(self.cols) {
@@ -645,6 +697,9 @@ pub fn diff(prev: &Grid, next: &Grid, caps: &HostCaps, out: &mut Vec<u8>) {
         w.out.extend_from_slice(b"\x1b[0m\x1b[H\x1b[2J");
     }
     for y in 0..next.rows {
+        if !next.paints(y) {
+            continue;
+        }
         let nrow = next.row(y);
         let prow = if full { None } else { Some(prev.row(y)) };
         let mut x = 0u16;

@@ -465,7 +465,7 @@ pub fn deadlines(app: &App, now: Instant, d: &mut crate::deadline::Deadlines) {
         .filter(|t| *t > now)
         .min()
     {
-        d.at("exit_badge", t);
+        d.redraw("exit_badge", t);
     }
     if let Some(t) = app
         .osc
@@ -476,7 +476,7 @@ pub fn deadlines(app: &App, now: Instant, d: &mut crate::deadline::Deadlines) {
         .filter(|t| *t > now)
         .min()
     {
-        d.at("recovery_notice", t);
+        d.redraw("recovery_notice", t);
     }
 }
 

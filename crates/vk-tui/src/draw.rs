@@ -943,6 +943,9 @@ pub(crate) fn compose_with_sidebar(
             if r.selectable() {
                 target_i += 1;
             }
+            if !g.paints(y) {
+                continue;
+            }
             if selected || r.focused {
                 g.fill(SRect { x: sx, y, w, h: 1 }, t.sel(t.fg));
             }
@@ -1411,6 +1414,9 @@ fn draw_borders(
         .and_then(|f| rects.iter().find(|(p, _)| p == f))
         .map(|(_, r)| *r);
     for y in area.y..area.y + area.h {
+        if !g.paints(y) {
+            continue;
+        }
         for x in area.x..area.x + area.w {
             if covered(x, y) {
                 continue;
