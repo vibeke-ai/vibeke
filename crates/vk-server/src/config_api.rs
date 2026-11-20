@@ -36,11 +36,13 @@ fn set_lock() -> &'static tokio::sync::Mutex<()> {
 
 /// The config this server applies now (loaded on first use).
 pub fn current() -> Config {
+    with_current(Clone::clone)
+}
+
+/// Read one setting without copying the rest of the config on the input path.
+pub(crate) fn with_current<T>(read: impl FnOnce(&Config) -> T) -> T {
     let mut a = applied().lock().unwrap();
-    if a.is_none() {
-        *a = Some(load_effective().unwrap_or_default());
-    }
-    a.clone().unwrap_or_default()
+    read(a.get_or_insert_with(|| load_effective().unwrap_or_default()))
 }
 
 fn load_effective() -> Result<Config, ConfigError> {

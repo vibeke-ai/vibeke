@@ -295,10 +295,9 @@ pub fn input_modes(server: &Server, pane: &str) -> InputModes {
     };
     // Programs without the kitty keyboard protocol or modifyOtherKeys can't tell shift+enter
     // from enter; `\n` (ctrl+J) is the newline key agent TUIs understand (Claude Code, Codex).
-    m.shift_enter_lf = matches!(
-        crate::config_api::current().keys.shift_enter_legacy,
-        vk_config::ShiftEnterLegacy::Lf
-    );
+    m.shift_enter_lf = crate::config_api::with_current(|cfg| {
+        matches!(cfg.keys.shift_enter_legacy, vk_config::ShiftEnterLegacy::Lf)
+    });
     m
 }
 
