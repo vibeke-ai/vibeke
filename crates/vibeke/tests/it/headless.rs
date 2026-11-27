@@ -540,9 +540,13 @@ fn claude_headless_pending_approval_survives_restart_and_is_answered_once() {
         json!({"interaction": it["id"], "decision": "allow"}),
     )
     .unwrap();
-    let r = s.until("turn done", 20, || {
+    // The adapter records the Stop signal and result usage in separate commits.
+    let r = s.until("turn done and usage recorded", 20, || {
         let r = s.run(&run_id);
-        (r["execution"]["value"] == "Idle" && r["last_message"] == "Done.").then_some(r)
+        (r["execution"]["value"] == "Idle"
+            && r["last_message"] == "Done."
+            && r["usage"]["source"] == "stream-json")
+            .then_some(r)
     });
     assert_eq!(s.log_count("perm:perm-1:allow"), 1, "{}", s.log_text());
     assert_eq!(r["usage"]["input_tokens"], 30);
