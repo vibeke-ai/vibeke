@@ -41,6 +41,7 @@ pub const METHODS: &[(&str, bool)] = &[
     ("mention.list", false),
     ("mention.suggest", false),
     ("mention.set", true),
+    ("mention.assign", true),
     ("mention.clear", true),
     ("message.send", true),
     ("message.reply", true),
@@ -56,7 +57,7 @@ pub const METHODS: &[(&str, bool)] = &[
 pub const PANE_FORBIDDEN: &[&str] = &["message.retry"];
 
 /// Methods a pane-scoped caller may use on its own pane only (`api::pane_scope_of`): an agent
-/// names only its own pane (§2.3) and reads only its own messages.
+/// changes its own existing name and reads only its own messages (§2.3).
 pub const OWN_PANE: &[&str] = &[
     "mention.set",
     "mention.clear",
@@ -503,6 +504,7 @@ pub async fn api(server: &Arc<Server>, ctx: &Ctx, method: &str, p: &Value) -> Op
         "mention.list" => names::list(server, ctx, p),
         "mention.suggest" => names::suggest(server, ctx, p),
         "mention.set" => names::set(server, ctx, p),
+        "mention.assign" => names::assign(server, ctx, p),
         "mention.clear" => names::clear(server, ctx, p),
         "message.send" => send_api(server, ctx, p),
         "message.reply" => reply(server, ctx, p),
@@ -930,8 +932,10 @@ pub const SHAPES: &str = r##"
 mention.list :: {workspace?: Target, unnamed?: bool = false} => {mentions: [MentionEntry], unnamed?: [{pane: string, pane_handle: string, workspace: string, suggested: string, label: string, harness: string|null, state: idle|busy|needs_input|exited|shell}]}
 # the pane's name, or a proposal built from its sidebar label (§2.2)
 mention.suggest :: {pane?: Target} => {name: string, named: bool}
-# a pane-scoped caller names only its own pane; name omitted: the current or the suggested name
+# a pane-scoped caller can set the name and delivery settings of its own pane
 mention.set :: {pane?: Target, name?: string, kind?: agent|terminal, delivery?: bool} => MentionName
+# give a pane its first name (omitted: the suggested name); pane-scoped callers are limited to their workspace
+mention.assign :: {pane: Target, name?: string} => MentionName
 mention.clear :: {pane?: Target} => {}
 # to named panes of one workspace; a pane-scoped caller sends from its own pane inside its own workspace
 message.send :: {to: [string], body: string, expects_reply?: bool = true, workspace?: Target} => MentionThreadItem

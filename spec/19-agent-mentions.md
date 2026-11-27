@@ -35,11 +35,12 @@ taken)`. `label` is the sidebar label (`AgentRun::label()` for an agent pane, ot
 `Pane::display_title()`). `fallback` is the harness for an agent pane, otherwise the base name
 of the pane's cwd. Taken names get `-2`, `-3`….
 
-### 2.3 Consent
+### 2.3 Naming permissions
 
 Only named panes receive messages. A person names a pane in the TUI picker (§5), the palette,
-the CLI or the web app. An agent may name only its own pane. Naming a pane is the consent for
-it to receive messages from other panes of the workspace.
+the CLI or the web app. An agent can give another pane in its workspace its first name. An
+agent can change or clear its own name and edit its own delivery settings. An explicit clear
+blocks further peer assignments until the pane itself or a person names it again.
 
 ## 3. Data and API
 
@@ -56,6 +57,7 @@ All methods are additive to `vibeke/1`. "Pane caller" means a caller with a pane
 | `mention.list` | `workspace?` (default: the caller's workspace, else all) | `{mentions: [MentionName + label, harness?, state]}`, where `state` is `idle`, `busy`, `needs_input`, `exited` or `shell` | open |
 | `mention.suggest` | `pane` | `{name}` | open |
 | `mention.set` | `pane`, `name?` (omitted: suggested), `kind?`, `delivery?` | `MentionName` | own pane only |
+| `mention.assign` | `pane`, `name?` (omitted: suggested) | `MentionName` | open, own workspace only, gives a pane its first name |
 | `mention.clear` | `pane` | `{}` | own pane only |
 | `message.send` | `to: [name]`, `body`, `expects_reply?` (default true), `workspace?` | `{message, deliveries: [{id, name, state}]}` | open, own workspace only |
 | `message.reply` | `message` (the one being answered), `body` | `{message, deliveries}` | the recipient pane of that message |

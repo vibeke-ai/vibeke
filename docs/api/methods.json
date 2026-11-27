@@ -8,7 +8,7 @@
     "proto": 2,
     "min": 1
   },
-  "method_count": 470,
+  "method_count": 471,
   "methods": [
     {
       "name": "adapter.control",
@@ -3333,6 +3333,20 @@
       "spec": null,
       "params": "{label: string, kind?: ssh|quic = ssh, id?: string, address?: string, os?: string, arch?: string, vibeke_version?: string, status?: connected|connecting|degraded|offline, reason?: string}",
       "result": "{machine: Machine, created: bool, cursor: Cursor}"
+    },
+    {
+      "name": "mention.assign",
+      "mutating": true,
+      "scope": "pane",
+      "pane_scope": "open",
+      "gateway": "actor_required",
+      "tables": [
+        "mentions"
+      ],
+      "milestone": null,
+      "spec": null,
+      "params": "{pane: Target, name?: string}",
+      "result": "MentionName"
     },
     {
       "name": "mention.clear",

@@ -4880,6 +4880,13 @@ export type MachineUpsertResult = {
   cursor: Cursor;
 };
 
+export type MentionAssignParams = {
+  pane: Target;
+  name?: string;
+};
+
+export type MentionAssignResult = MentionName;
+
 export type MentionClearParams = {
   pane?: Target;
 };
@@ -8616,6 +8623,7 @@ export interface Methods {
   "machine.list": { params: MachineListParams; result: MachineListResult };
   "machine.remove": { params: MachineRemoveParams; result: MachineRemoveResult };
   "machine.upsert": { params: MachineUpsertParams; result: MachineUpsertResult };
+  "mention.assign": { params: MentionAssignParams; result: MentionAssignResult };
   "mention.clear": { params: MentionClearParams; result: MentionClearResult };
   "mention.list": { params: MentionListParams; result: MentionListResult };
   "mention.set": { params: MentionSetParams; result: MentionSetResult };
@@ -9092,6 +9100,7 @@ export const METHOD_INFO: Record<MethodName, { mutating: boolean; scope: "full" 
   "machine.list": { mutating: false, scope: "pane", paneScope: "open" },
   "machine.remove": { mutating: true, scope: "full", paneScope: "forbidden" },
   "machine.upsert": { mutating: true, scope: "full", paneScope: "forbidden" },
+  "mention.assign": { mutating: true, scope: "pane", paneScope: "open" },
   "mention.clear": { mutating: true, scope: "pane", paneScope: "own_target" },
   "mention.list": { mutating: false, scope: "pane", paneScope: "open" },
   "mention.set": { mutating: true, scope: "pane", paneScope: "own_target" },

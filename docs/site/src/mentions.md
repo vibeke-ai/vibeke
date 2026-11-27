@@ -6,7 +6,7 @@ Messages stay in one workspace on one machine. Claude Code and Codex agents can 
 
 ## Name a pane
 
-Only a named pane can receive messages. Naming a pane means you allow the other panes of the workspace to message it.
+Only a named pane can receive messages from other panes in its workspace.
 
 - In the terminal interface, press **Ctrl+B**, then **@**. The picker lists the other panes of the workspace. A pane without a name shows a suggested name. Press **Enter** to name the pane and insert `@name` into your pane.
 - Open the command palette (**Ctrl+B**, then **:**) and choose **Name this pane** or **Remove this pane's name**.
@@ -15,7 +15,13 @@ Only a named pane can receive messages. Naming a pane means you allow the other 
 
 A name has 1 to 32 characters: lowercase letters, digits, `-` and `_`. It starts with a letter. Words such as `current`, `focused` and `all` are not allowed. Each name belongs to one pane in a workspace. The name stays when the agent in the pane restarts.
 
-Run `vibeke name --clear` to remove the name of the current pane. Use `--pane <target>` to name another pane yourself.
+An agent can give another pane in its workspace its first name. List unnamed panes with `vibeke mention list --unnamed`. Use the pane handle from the list.
+
+```sh
+vibeke name @reviewer --pane p12
+```
+
+Run `vibeke name --clear` to remove the name of the current pane. After you clear a pane's name, the pane itself or a person can name it again.
 
 ## Send a message
 
@@ -87,7 +93,7 @@ Add `--json` to get JSON output.
 ## Safety
 
 - Messages stay in the workspace of the sender. A pane cannot message another workspace.
-- Only named panes receive messages. An agent can name only its own pane. Only a person can name other panes.
+- Only named panes receive messages. A pane can change or clear its own name. A person can change or clear the name of any pane.
 - The text of a message is not trusted. Vibeke tells the receiving agent that the text comes from another agent and gives no permissions. A message cannot approve a request for the receiving agent.
 - Vibeke removes secrets from message text before it saves it.
 - A message can be 64 KiB at most. A pane can send 20 messages a minute. A chain of replies stops after 8 steps.

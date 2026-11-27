@@ -246,7 +246,7 @@ fn naming_rules_and_conflicts() {
         .call("mention.set", json!({"pane": a.pane, "name": "reviewer"}))
         .unwrap_err();
     assert_eq!(kind(&e), ("conflict".into(), "name_taken".into()), "{e}");
-    // An agent names only its own pane.
+    // The original method still lets an agent set only its own name.
     let mut pa = Api::pane(&s, &a.token);
     let e = pa
         .call("mention.set", json!({"pane": b.pane, "name": "x"}))
@@ -275,6 +275,100 @@ fn naming_rules_and_conflicts() {
         let l = user.ok("mention.list", json!({}));
         l["mentions"].as_array().unwrap().is_empty().then_some(())
     });
+    user.check_events();
+}
+
+#[test]
+fn a_pane_can_name_an_unnamed_peer_and_message_it() {
+    let s = Session::new();
+    let a = agent_pane(&s, "a", None);
+    let b = agent_pane(&s, "b", Some(&a.pane));
+    let c = agent_pane(&s, "c", None);
+    let mut user = Api::user(&s);
+    let mut pa = Api::pane(&s, &a.token);
+    session_start(&s, &a, "a");
+    session_start(&s, &b, "b");
+
+    let cli = |args: &[&str]| {
+        s.cmd(args)
+            .env("VIBEKE", "1")
+            .env("VIBEKE_PANE_TOKEN", &a.token)
+            .env_remove("VIBEKE_ELEVATED_TOKEN")
+            .env_remove("VIBEKE_PLUGIN_TOKEN")
+            .output()
+            .unwrap()
+    };
+    let list = cli(&["mention", "list", "--unnamed"]);
+    assert!(
+        list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    let unnamed: Value = serde_json::from_slice(&list.stdout).unwrap();
+    let handle = unnamed["unnamed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["pane"] == b.pane)
+        .unwrap()["pane_handle"]
+        .as_str()
+        .unwrap();
+    let out = cli(&["name", "@reviewer", "--pane", handle]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let assigned: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(assigned["name"], "reviewer");
+    assert_eq!(assigned["pane"], b.pane);
+    assert_eq!(assigned["delivery"], true);
+
+    let retry = pa.ok(
+        "mention.assign",
+        json!({"pane": handle, "name": "reviewer"}),
+    );
+    assert_eq!(retry, assigned);
+    let rename = cli(&["name", "@different", "--pane", handle]);
+    assert!(!rename.status.success());
+    assert!(String::from_utf8_lossy(&rename.stderr).contains("pane_already_named"));
+    let clear = pa
+        .call("mention.clear", json!({"pane": handle}))
+        .unwrap_err();
+    assert_eq!(kind(&clear).0, "permission_denied");
+    let foreign = pa
+        .call("mention.assign", json!({"pane": c.pane, "name": "other"}))
+        .unwrap_err();
+    assert_eq!(kind(&foreign).0, "permission_denied");
+
+    let sent = pa.ok(
+        "message.send",
+        json!({"to": ["@reviewer"], "body": "Please check the parser."}),
+    );
+    let mid = sent["message"]["id"].as_str().unwrap();
+    let out = take_envelope(&s, &mut user, &b, mid);
+    assert!(context(&out).contains("Please check the parser."), "{out}");
+
+    let events = user.ok(
+        "events.read",
+        json!({"types": ["mention.set"], "limit": 500}),
+    );
+    let events = events["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["subject"]["pane"], b.pane);
+    assert_eq!(events[0]["actor"]["pane"], a.pane);
+
+    user.ok("mention.clear", json!({"pane": handle}));
+    let blocked = pa
+        .call(
+            "mention.assign",
+            json!({"pane": handle, "name": "reviewer"}),
+        )
+        .unwrap_err();
+    assert_eq!(kind(&blocked).0, "permission_denied");
+    let mut pb = Api::pane(&s, &b.token);
+    let restored = pb.ok("mention.set", json!({"name": "reviewer"}));
+    assert_eq!(restored["pane"], b.pane);
     user.check_events();
 }
 

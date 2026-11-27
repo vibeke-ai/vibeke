@@ -725,6 +725,9 @@ class Api:
     async def machine_upsert(self, params: "t.MachineUpsertParams") -> "t.MachineUpsertResult":
         return await self.call("machine.upsert", params)  # type: ignore[arg-type, return-value]
 
+    async def mention_assign(self, params: "t.MentionAssignParams") -> "t.MentionAssignResult":
+        return await self.call("mention.assign", params)  # type: ignore[arg-type, return-value]
+
     async def mention_clear(self, params: "Optional[t.MentionClearParams]" = None) -> "t.MentionClearResult":
         return await self.call("mention.clear", params or {})  # type: ignore[arg-type, return-value]
 

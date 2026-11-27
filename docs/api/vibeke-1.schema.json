@@ -20231,6 +20231,28 @@
         ]
       }
     },
+    "mention.assign": {
+      "mutating": true,
+      "scope": "pane",
+      "pane_scope": "open",
+      "params": {
+        "type": "object",
+        "properties": {
+          "pane": {
+            "$ref": "#/$defs/Target"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pane"
+        ]
+      },
+      "result": {
+        "$ref": "#/$defs/MentionName"
+      }
+    },
     "mention.clear": {
       "mutating": true,
       "scope": "pane",

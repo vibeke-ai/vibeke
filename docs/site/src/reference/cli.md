@@ -154,9 +154,10 @@ Use `--json` to print JSON. Non-terminal output also uses JSON.
 
 | Verb | Positionals | Method | Description |
 |---|---|---|---|
-| `list` | - | `mention.list` | [--workspace w] named panes with label, harness and state (spec 19) |
+| `list` | - | `mention.list` | [--workspace w] [--unnamed] list pane names and show suggestions for unnamed panes |
 | `suggest` | `<pane>` | `mention.suggest` | <pane> a free name for the pane |
 | `set` | `<pane>` `<name>` | `mention.set` | <pane> [name] [--kind agent\|terminal] [--no-delivery] (no name: the suggested one) |
+| `assign` | `<pane>` `<name>` | `mention.assign` | <pane> [name] give a pane its first name |
 | `clear` | `<pane>` | `mention.clear` | <pane> |
 
 ## `vibeke message`

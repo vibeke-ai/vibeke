@@ -5269,6 +5269,13 @@ MachineUpsertResult = TypedDict("MachineUpsertResult", {
     "cursor": "Cursor",
 })
 
+MentionAssignParams = TypedDict("MentionAssignParams", {
+    "pane": "Target",
+    "name": NotRequired[str],
+})
+
+MentionAssignResult: TypeAlias = "MentionName"
+
 MentionClearParams = TypedDict("MentionClearParams", {
     "pane": NotRequired["Target"],
 })
@@ -9277,6 +9284,7 @@ METHODS: Dict[str, Dict[str, Any]] = {
     "machine.list": {"mutating": False, "scope": "pane", "pane_scope": "open"},
     "machine.remove": {"mutating": True, "scope": "full", "pane_scope": "forbidden"},
     "machine.upsert": {"mutating": True, "scope": "full", "pane_scope": "forbidden"},
+    "mention.assign": {"mutating": True, "scope": "pane", "pane_scope": "open"},
     "mention.clear": {"mutating": True, "scope": "pane", "pane_scope": "own_target"},
     "mention.list": {"mutating": False, "scope": "pane", "pane_scope": "open"},
     "mention.set": {"mutating": True, "scope": "pane", "pane_scope": "own_target"},

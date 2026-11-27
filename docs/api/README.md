@@ -280,6 +280,7 @@ Clients must accept new fields and event types. The API can change before versio
 | `machine.list` | Read | Pane |
 | `machine.remove` | Write | Full |
 | `machine.upsert` | Write | Full |
+| `mention.assign` | Write | Pane |
 | `mention.clear` | Write | Own panes |
 | `mention.list` | Read | Pane |
 | `mention.set` | Write | Own panes |

@@ -1,8 +1,9 @@
 //! Mention names (spec 19 §2): at most one per pane, unique in its workspace, frozen once given.
-//! Naming a pane is the consent for it to receive messages from the other panes of its
-//! workspace (§2.3): a person names any pane, an agent only its own.
+//! Giving a pane a name lets it receive messages from its workspace (§2.3). Agents can
+//! give other panes in their workspace a first name.
 
 use super::*;
+use crate::core::K_MENTION_PEER_BLOCKED;
 use vk_proto::mention::MentionName;
 use vk_proto::model::{Execution, InteractionStatus};
 
@@ -146,9 +147,8 @@ fn target_pane(server: &Server, ctx: &Ctx, p: &Value, method: &str) -> Result<Pa
     if let Some(own) = &ctx.pane_scope
         && &pane.id != own
     {
-        return Err(denied(format!(
-            "{method}: an agent may name only its own pane"
-        )));
+        return Err(denied(format!("{method}: target pane is not yours"))
+            .details(json!({"scope": "pane", "reason": "other_pane"})));
     }
     Ok(pane)
 }
@@ -229,53 +229,109 @@ pub(super) fn suggest(server: &Server, ctx: &Ctx, p: &Value) -> R {
 
 pub(super) fn set(server: &Server, ctx: &Ctx, p: &Value) -> R {
     let pane = target_pane(server, ctx, p, "mention.set")?;
-    if !nameable(&pane) {
-        return Err(invalid(
-            "browser panes and plugin surfaces cannot have a mention name",
-        ));
-    }
     let kind = match s(p, "kind") {
         None => None,
         Some("agent") => Some(MentionKind::Agent),
         Some("terminal") => Some(MentionKind::Terminal),
         Some(k) => return Err(invalid(format!("kind `{k}`: expected agent or terminal"))),
     };
+    write_name(
+        server,
+        ctx,
+        &pane.id,
+        s(p, "name"),
+        Some((kind, b(p, "delivery"))),
+    )
+}
+
+pub(super) fn assign(server: &Server, ctx: &Ctx, p: &Value) -> R {
+    let target = s(p, "pane")
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| invalid("pane target required"))?;
+    let pane = resolve_pane(server, ctx, Some(target))?;
+    write_name(server, ctx, &pane.id, s(p, "name"), None)
+}
+
+fn write_name(
+    server: &Server,
+    ctx: &Ctx,
+    pane_id: &str,
+    name: Option<&str>,
+    settings: Option<(Option<MentionKind>, Option<bool>)>,
+) -> R {
     let mut c = server.core.lock().unwrap();
-    let cur = c.model.mention_of(&pane.id).cloned();
-    let name = match s(p, "name") {
+    let pane = c.pane(pane_id).ok_or_else(|| not_found("pane", pane_id))?;
+    if let Some(own) = ctx
+        .pane_scope
+        .as_ref()
+        .filter(|own| settings.is_none() && *own != &pane.id)
+    {
+        if c.pane(own)
+            .is_none_or(|source| source.workspace != pane.workspace)
+        {
+            return Err(denied(
+                "mention.assign: target pane must be in your workspace",
+            ));
+        }
+        if c.store
+            .get::<bool>(K_MENTION_PEER_BLOCKED, &pane.id)
+            .map_err(internal)?
+            .unwrap_or(false)
+        {
+            return Err(denied("mention.assign: the target pane's name was cleared"));
+        }
+    }
+    if !nameable(pane) {
+        return Err(invalid(
+            "browser panes and plugin surfaces cannot have a mention name",
+        ));
+    }
+    let cur = c.model.mention_of(&pane.id);
+    let name = match name {
         Some(n) => n.trim().trim_start_matches('@').to_string(),
-        None => match &cur {
+        None => match cur {
             Some(m) => m.name.clone(),
-            None => suggest_for(&c, &pane),
+            None => suggest_for(&c, pane),
         },
     };
-    check(&c, &pane, &name)?;
+    if settings.is_none()
+        && let Some(existing) = cur
+    {
+        if existing.name == name {
+            return Ok(json!(existing));
+        }
+        return Err(conflict(
+            "pane_already_named",
+            format!("pane already has the name @{}", existing.name),
+        ));
+    }
+    check(&c, pane, &name)?;
+    let (kind, delivery) = settings.unwrap_or_default();
+    let created_at_ms = cur
+        .filter(|m| m.name == name)
+        .map(|m| m.created_at_ms)
+        .unwrap_or_else(now);
     let m = MentionName {
-        name: name.clone(),
+        name,
         workspace: pane.workspace.clone(),
         pane: pane.id.clone(),
-        kind: kind.or(cur.as_ref().map(|m| m.kind)).unwrap_or_default(),
-        delivery: b(p, "delivery")
-            .or(cur.as_ref().map(|m| m.delivery))
-            .unwrap_or(true),
-        created_at_ms: cur
-            .as_ref()
-            .filter(|m| m.name == name)
-            .map(|m| m.created_at_ms)
-            .unwrap_or_else(now),
+        kind: kind.or(cur.map(|m| m.kind)).unwrap_or_default(),
+        delivery: delivery.or(cur.map(|m| m.delivery)).unwrap_or(true),
+        created_at_ms,
     };
-    if cur.as_ref() == Some(&m) {
+    if cur == Some(&m) {
         return Ok(serde_json::to_value(&m).unwrap_or(Value::Null));
     }
     let mut tx = Tx::new();
-    tx.event(
+    tx.event_by(
         "mention.set",
         json!({"pane": m.pane, "workspace": m.workspace}),
+        crate::audit::actor_of(ctx),
         json!({
             "name": m.name,
             "kind": m.kind,
             "delivery": m.delivery,
-            "previous": cur.as_ref().map(|x| x.name.clone()),
+            "previous": cur.map(|x| &x.name),
             "via": if ctx.pane_scope.is_some() { "agent" } else { "user" },
         }),
     );
@@ -289,16 +345,19 @@ pub(super) fn set(server: &Server, ctx: &Ctx, p: &Value) -> R {
 pub(super) fn clear(server: &Server, ctx: &Ctx, p: &Value) -> R {
     let pane = target_pane(server, ctx, p, "mention.clear")?;
     let mut c = server.core.lock().unwrap();
-    let Some(m) = c.model.mention_of(&pane.id).cloned() else {
+    if !c.pane(&pane.id).is_some_and(nameable) {
         return Ok(json!({}));
-    };
+    }
     let mut tx = Tx::new();
-    tx.clear_mention(&m);
-    tx.event(
-        "mention.cleared",
-        json!({"pane": m.pane, "workspace": m.workspace}),
-        json!({"name": m.name, "reason": "cleared"}),
-    );
+    tx.m.put(K_MENTION_PEER_BLOCKED, &pane.id, None, &true);
+    if let Some(m) = c.model.mention_of(&pane.id) {
+        tx.clear_mention(m);
+        tx.event(
+            "mention.cleared",
+            json!({"pane": m.pane, "workspace": m.workspace}),
+            json!({"name": m.name, "reason": "cleared"}),
+        );
+    }
     server.commit(&mut c, tx).map_err(internal)?;
     drop(c);
     server.mentions.poke();

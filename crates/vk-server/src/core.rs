@@ -12,6 +12,8 @@ use vk_store::{Event, Mutation, Store, now_ms};
 
 /// Store kind of mention names (spec 19 §2), keyed by pane id: a pane has at most one name.
 pub const K_MENTION: &str = "mention_name";
+/// An explicit clear blocks other panes from giving this pane a new name.
+pub const K_MENTION_PEER_BLOCKED: &str = "mention_peer_blocked";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Counters {
@@ -124,6 +126,7 @@ impl Tx {
     /// Give a pane its mention name (spec 19 §2), replacing the one it had.
     pub fn mention(&mut self, m: MentionName) -> &mut Self {
         self.m.put(K_MENTION, &m.pane, Some(&m.name), &m);
+        self.m.delete(K_MENTION_PEER_BLOCKED, &m.pane);
         self.mentions.push(m);
         self
     }
@@ -145,6 +148,7 @@ impl Tx {
     pub fn close_pane(&mut self, p: &Pane) -> &mut Self {
         self.m.close("pane", &p.id, Some(&p.handle), p);
         self.m.holder_delete(&p.id);
+        self.m.delete(K_MENTION_PEER_BLOCKED, &p.id);
         self.removed.push(("pane", p.id.clone()));
         self
     }

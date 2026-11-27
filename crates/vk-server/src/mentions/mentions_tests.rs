@@ -270,7 +270,7 @@ async fn naming_rules_conflicts_and_pane_scope() {
     assert_eq!(kind(r), ("conflict".into(), "name_taken".into()));
     e.ok(&u, "mention.set", json!({"pane": "c", "name": "reviewer"}))
         .await;
-    // An agent names only its own pane.
+    // mention.set limits a pane caller to its own pane.
     let r = e
         .call(
             &pane_ctx("a"),

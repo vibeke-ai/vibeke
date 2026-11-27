@@ -424,7 +424,7 @@ pub const COMMANDS: &[(&str, &str, &str, &[&str], &str)] = &[
         "list",
         "mention.list",
         &[],
-        "[--workspace w] named panes with label, harness and state (spec 19)",
+        "[--workspace w] [--unnamed] list pane names and show suggestions for unnamed panes",
     ),
     (
         "mention",
@@ -439,6 +439,13 @@ pub const COMMANDS: &[(&str, &str, &str, &[&str], &str)] = &[
         "mention.set",
         &["pane", "name"],
         "<pane> [name] [--kind agent|terminal] [--no-delivery] (no name: the suggested one)",
+    ),
+    (
+        "mention",
+        "assign",
+        "mention.assign",
+        &["pane", "name"],
+        "<pane> [name] give a pane its first name",
     ),
     ("mention", "clear", "mention.clear", &["pane"], "<pane>"),
     (
@@ -4187,6 +4194,7 @@ mod tests {
             ("list", "mention.list"),
             ("suggest", "mention.suggest"),
             ("set", "mention.set"),
+            ("assign", "mention.assign"),
             ("clear", "mention.clear"),
         ] {
             assert_eq!(lookup("mention", verb).map(|l| l.0), Some(method));

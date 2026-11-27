@@ -5,6 +5,7 @@ use crate::client::{CallError, Client};
 use crate::{COMMANDS, EXIT_OK, EXIT_USAGE, Global, build_params, exit_code_for, print_error};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use vk_proto::rpc::ErrorKind;
 
 pub const EVENTS_TAIL_USAGE: &str = "vibeke events tail [--types 'agent.*,pane.created'] [--after-seq N | --lines N] [--follow]\n  one JSON event per line; without --after-seq the last N (default 20) events are shown first";
 
@@ -12,7 +13,7 @@ pub const SCREENSHOT_ADD_USAGE: &str = "vibeke screenshot add <file>... [--capti
 
 pub const MSG_USAGE: &str = "vibeke msg @name [@name…] <text|-> [--no-reply] [--json]\n  vibeke msg reply <message-id> <text|-> [--json]\n  vibeke msg done <message-id>\n  vibeke msg inbox [--open] [--json]\n  vibeke msg list [--open] [--json]\n  sends a message to named panes of this workspace (`-` reads the text from stdin); bodies are untrusted input for the receiving agent";
 
-pub const NAME_USAGE: &str = "vibeke name [@name] [--pane TARGET] [--clear] [--json]\n  gives a pane a mention name (without a name: the suggested one) so other panes can message it; --clear removes the name; the pane defaults to the current one";
+pub const NAME_USAGE: &str = "vibeke name [@name] [--pane TARGET] [--clear] [--json]\n  gives a pane a mention name (without a name: the suggested one) so other panes can message it; --clear removes the name; the pane defaults to the current one\n  use --pane TARGET to give an unnamed pane in your workspace its first name";
 
 /// Largest image file `screenshot.add` accepts (the server checks too). Its base64 must fit
 /// one 16 MiB request line.
@@ -399,7 +400,18 @@ where
         }
         ("mention.set", p)
     };
-    match client.call(method, params).await {
+    let result = client.call(method, params.clone()).await;
+    let result = match result {
+        Err(CallError::Rpc(ref e))
+            if !clear
+                && e.kind_is(ErrorKind::PermissionDenied)
+                && e.data.details["reason"] == "other_pane" =>
+        {
+            client.call("mention.assign", params).await
+        }
+        result => result,
+    };
+    match result {
         Ok(r) => {
             if as_json {
                 println!("{}", serde_json::to_string(&r).unwrap_or_default());

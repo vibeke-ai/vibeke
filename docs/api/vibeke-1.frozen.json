@@ -1193,6 +1193,11 @@
       "scope": "full",
       "pane_scope": "forbidden"
     },
+    "mention.assign": {
+      "mutating": true,
+      "scope": "pane",
+      "pane_scope": "open"
+    },
     "mention.clear": {
       "mutating": true,
       "scope": "pane",
