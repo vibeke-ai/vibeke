@@ -46,12 +46,12 @@ crossterm = { version = "0.29", features = ["bracketed-paste", "event-stream"] }
 futures = "0.3"
 hmac = "0.13"
 libc = "0.2"
-notify = "8"
+notify = "9"
 polling = "3"
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 rand = "0.10"
 regex = "1"
-rusqlite = { version = "0.41", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 rustix = { version = "1", features = ["pty", "termios", "process", "fs", "net", "stdio"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["preserve_order"] }
